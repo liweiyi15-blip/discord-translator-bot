@@ -10,7 +10,6 @@ import re
 # 配置
 TOKEN = os.getenv('DISCORD_TOKEN')
 MIN_WORDS = 5
-DELETE_MODE = True
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -44,14 +43,25 @@ async def translate_text(text):
     
     try:
         print(f'翻译调用: {text}')
-        # 强制英文源，防误判
-        result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')
-        translated = result['translatedText']
-        print(f'翻译结果: {translated}')
-        if translated == text:
-            print('翻译与原文相同，跳过')
+        detection = client.detect_language(text)
+        detected_lang = detection['language']
+        print(f'检测语言: {detected_lang}')
+        
+        if detected_lang.startswith('zh'):
+            print('检测为中文，跳过')
             return text
-        return translated
+        
+        if detected_lang == 'en':
+            result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')  # format_='html'保持粗体/Markdown
+            translated = result['translatedText']
+            print(f'翻译结果: {translated}')
+            if translated == text:
+                print('翻译与原文相同，跳过')
+                return text
+            return translated
+        else:
+            print('非英文，跳过')
+            return text
     except Exception as e:
         print(f'翻译异常详情: {e}')
         return text
@@ -88,25 +98,25 @@ async def on_message(message):
                 finally:
                     await webhook.delete()
             except discord.Forbidden as e:
-                print(f'Webhook权限失败: {e}，Fallback发送翻译')
+                print(f'Webhook权限失败: {e}，Fallback发送')
                 if mode == 'replace':
                     try:
                         await message.delete()
                     except Exception as e:
                         print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
-                    await message.reply(translated)  # 直接reply translated
+                    await message.reply(f"**[{message.author.display_name}]** {translated}")
                 else:
                     await message.channel.send(f"**[{message.author.display_name}]** {translated}")
             except Exception as e:
-                print(f'Webhook异常: {e}，Fallback发送翻译')
+                print(f'Webhook异常: {e}，Fallback发送')
                 if mode == 'replace':
                     try:
                         await message.delete()
                     except Exception as e:
                         print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
-                    await message.reply(translated)
+                    await message.reply(f"**[{message.author.display_name}]** {translated}")
                 else:
                     await message.channel.send(f"**[{message.author.display_name}]** {translated}")
     await bot.process_commands(message)
@@ -120,15 +130,24 @@ async def on_ready():
     except Exception as e:
         print(f'命令同步失败: {e}')
 
-@bot.tree.command(name='mode', description='设置频道翻译模式: reply (回复翻译) / replace (删除代替) / off (关闭自动翻译)')
-async def mode(interaction: discord.Interaction, mode: str):
+# 三个独立命令
+@bot.tree.command(name='reply_mode', description='在此频道设置回复翻译模式 (原下回复翻译)')
+async def reply_mode(interaction: discord.Interaction):
     channel_id = interaction.channel.id
-    if mode.lower() in ['reply', 'replace', 'off']:
-        channel_modes[channel_id] = mode.lower()
-        status = '回复模式' if mode.lower() == 'reply' else '删除代替模式' if mode.lower() == 'replace' else '关闭自动翻译'
-        await interaction.response.send_message(f'频道翻译模式设为 {status}，仅此频道生效', ephemeral=True)
-    else:
-        await interaction.response.send_message('无效模式！用 reply / replace / off', ephemeral=True)
+    channel_modes[channel_id] = 'reply'
+    await interaction.response.send_message('频道翻译模式设为回复模式 (原下回复翻译)，仅此频道生效', ephemeral=True)
+
+@bot.tree.command(name='replace_mode', description='在此频道设置删除代替翻译模式 (删原+发新，头像/ID一样)')
+async def replace_mode(interaction: discord.Interaction):
+    channel_id = interaction.channel.id
+    channel_modes[channel_id] = 'replace'
+    await interaction.response.send_message('频道翻译模式设为删除代替模式 (删原+发新)，仅此频道生效', ephemeral=True)
+
+@bot.tree.command(name='off_mode', description='在此频道关闭自动翻译')
+async def off_mode(interaction: discord.Interaction):
+    channel_id = interaction.channel.id
+    channel_modes[channel_id] = 'off'
+    await interaction.response.send_message('频道自动翻译已关闭，仅此频道生效', ephemeral=True)
 
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
