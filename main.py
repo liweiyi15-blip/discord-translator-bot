@@ -3,6 +3,7 @@ from discord.ext import commands
 import asyncio
 import os  # 用环境变量安全读取Token/Key
 from deep_translator import GoogleTranslator  # Google Translate库（兼容3.13）
+import re  # 用于中文字符检测
 
 # 你的配置（用环境变量，Railway设置）
 TOKEN = os.getenv('DISCORD_TOKEN')  # 从Railway Variables读取
@@ -15,22 +16,18 @@ intents.message_content = True  # 读消息内容
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # 初始化翻译器（全局单例，高效）
-translator = GoogleTranslator(source='auto', target='zh-CN')  # auto检测，zh-CN=简中（修复语言代码）
+translator = GoogleTranslator(source='auto', target='zh-CN')  # auto检测，zh-CN=简中
 
 # 翻译函数：用deep-translator（自动检测+英翻中）
 async def translate_text(text):
     if len(text.split()) < MIN_WORDS:  # 少于5字返回原文本
         return text
     
+    # 检测是否含中文字符（简/繁体），如果是则不翻译
+    if re.search(r'[\u4e00-\u9fff]', text):
+        return text
+    
     try:
-        # 先检测语言
-        detected = translator.detect(text)
-        src_lang = detected.lang
-        
-        # 如果是中文（zh-CN/zh-TW）不翻译
-        if src_lang in ['zh-CN', 'zh-TW', 'zh']:
-            return text
-        
         # 翻译
         translated = translator.translate(text)
         
