@@ -3,8 +3,7 @@ from discord.ext import commands
 import aiohttp
 import asyncio
 import requests
-from langdetect import detect, LangDetectException
-import os  # 新增：用环境变量安全读取Token/Key
+import os  # 用环境变量安全读取Token/Key
 
 # 你的配置（用环境变量，Railway设置）
 TOKEN = os.getenv('DISCORD_TOKEN')  # 从Railway Variables读取
@@ -18,37 +17,45 @@ intents = discord.Intents.default()
 intents.message_content = True  # 读消息内容
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 翻译函数：用OpenRouter API
+# API调用辅助函数
+async def call_openrouter(prompt):
+    headers = {
+        'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+        'Content-Type': 'application/json'
+    }
+    data = {
+        'model': MODEL,
+        'messages': [{'role': 'user', 'content': prompt}]
+    }
+    async with aiohttp.ClientSession() as session:
+        async with session.post('https://openrouter.ai/api/v1/chat/completions', headers=headers, json=data) as resp:
+            if resp.status == 200:
+                result = await resp.json()
+                return result['choices'][0]['message']['content'].strip()
+            else:
+                return None
+
+# 翻译函数：用OpenRouter API（用DeepSeek检测语言）
 async def translate_text(text):
     if len(text.split()) < MIN_WORDS:  # 少于5字返回原文本
         return text
     
     try:
-        # 检测语言
-        lang = detect(text)
-        if lang in ['zh-cn', 'zh-tw', 'zh']:  # 中文/繁体不翻译
+        # 用DeepSeek检测语言
+        lang_prompt = f"Detect the language of this text. Respond only with 'EN' if English, or 'ZH' if Chinese (simplified or traditional). Do not add extra text. Text: {text}"
+        lang_response = await call_openrouter(lang_prompt)
+        
+        if lang_response != 'EN':  # 非英文不翻译
             return text
         
         # 英文翻译成中文
-        prompt = f"Translate the following English text to Chinese (Simplified): {text}"
+        translate_prompt = f"Translate the following English text to Chinese (Simplified). Respond only with the translation, no extra text: {text}"
+        translated = await call_openrouter(translate_prompt)
         
-        headers = {
-            'Authorization': f'Bearer {OPENROUTER_API_KEY}',
-            'Content-Type': 'application/json'
-        }
-        data = {
-            'model': MODEL,
-            'messages': [{'role': 'user', 'content': prompt}]
-        }
-        async with aiohttp.ClientSession() as session:
-            async with session.post('https://openrouter.ai/api/v1/chat/completions', headers=headers, json=data) as resp:
-                if resp.status == 200:
-                    result = await resp.json()
-                    return result['choices'][0]['message']['content'].strip()
-                else:
-                    return f"翻译失败: {text}"  # 出错返回原文本
-    except LangDetectException:
-        return text  # 检测失败不翻译
+        return translated if translated else f"翻译失败: {text}"
+        
+    except Exception:
+        return text  # 出错返回原文本
 
 # 自动翻译：监听消息
 @bot.event
@@ -74,6 +81,16 @@ async def on_message(message):
     
     await bot.process_commands(message)  # 处理命令
 
+# Bot就绪事件：在这里同步命令（修复MissingApplicationID错误）
+@bot.event
+async def on_ready():
+    print(f'{bot.user} 已上线！')
+    try:
+        synced = await bot.tree.sync()
+        print(f'同步了 {len(synced)} 命令')
+    except Exception as e:
+        print(f'命令同步失败: {e}')
+
 # /toggle命令：开关删除模式
 @bot.tree.command(name='toggle', description='切换删除原始消息模式')
 async def toggle(interaction: discord.Interaction):
@@ -97,10 +114,7 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
 
 # 启动Bot
 async def main():
-    async with bot:
-        synced = await bot.tree.sync()  # 同步命令
-        print(f'同步了 {len(synced)} 命令')
-        await bot.start(TOKEN)
+    await bot.start(TOKEN)
 
 if __name__ == '__main__':
     asyncio.run(main())
