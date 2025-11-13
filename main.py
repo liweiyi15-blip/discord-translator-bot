@@ -19,6 +19,8 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 
 # API调用辅助函数
 async def call_openrouter(prompt):
+    if not OPENROUTER_API_KEY:
+        return None  # 防Key为空
     headers = {
         'Authorization': f'Bearer {OPENROUTER_API_KEY}',
         'Content-Type': 'application/json'
@@ -33,6 +35,7 @@ async def call_openrouter(prompt):
                 result = await resp.json()
                 return result['choices'][0]['message']['content'].strip()
             else:
+                print(f'API错误: {resp.status}')  # 调试用
                 return None
 
 # 翻译函数：用OpenRouter API（用DeepSeek检测语言）
@@ -54,7 +57,8 @@ async def translate_text(text):
         
         return translated if translated else f"翻译失败: {text}"
         
-    except Exception:
+    except Exception as e:
+        print(f'翻译异常: {e}')  # 调试用
         return text  # 出错返回原文本
 
 # 自动翻译：监听消息
@@ -67,17 +71,22 @@ async def on_message(message):
     if isinstance(message.channel, discord.TextChannel):
         translated = await translate_text(message.content)
         
-        if translated != message.content:  # 需要翻译
+        if translated and translated != message.content:  # 需要翻译
             # 用Webhook模拟原作者头像/ID发送
-            webhook = await message.channel.create_webhook(name=message.author.display_name)
             try:
-                if DELETE_MODE:
-                    await message.delete()  # 删除原消息
-                    await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
-                else:
-                    await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
-            finally:
-                await webhook.delete()  # 清理webhook
+                webhook = await message.channel.create_webhook(name=message.author.display_name)
+                try:
+                    if DELETE_MODE:
+                        await message.delete()  # 删除原消息
+                        await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
+                    else:
+                        await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
+                finally:
+                    await webhook.delete()  # 清理webhook
+            except discord.Forbidden:
+                print('权限不足: 无法创建webhook或删除消息')  # 调试用
+                # 备选：直接Bot发，但头像不对
+                await message.channel.send(f"**[{message.author.display_name}]** {translated}")
     
     await bot.process_commands(message)  # 处理命令
 
@@ -114,6 +123,9 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
 
 # 启动Bot
 async def main():
+    if not TOKEN:
+        print('错误: DISCORD_TOKEN 未设置！')
+        return
     await bot.start(TOKEN)
 
 if __name__ == '__main__':
