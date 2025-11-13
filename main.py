@@ -131,8 +131,7 @@ async def on_ready():
     except Exception as e:
         print(f'命令同步失败: {e}')
 
-@bot.tree.command(name='mode', description='设置频道翻译模式')
-@mode.describe(mode='reply (回复翻译) / replace (删除代替) / off (关闭自动翻译)')
+@bot.tree.command(name='mode', description='设置频道翻译模式: reply (回复翻译) / replace (删除代替) / off (关闭自动翻译)')
 async def mode(interaction: discord.Interaction, mode: str):
     channel_id = interaction.channel.id
     if mode.lower() in ['reply', 'replace', 'off']:
@@ -161,3 +160,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+    
