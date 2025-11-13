@@ -10,6 +10,7 @@ import re
 # 配置
 TOKEN = os.getenv('DISCORD_TOKEN')
 MIN_WORDS = 5
+DELETE_MODE = True  # 默认replace模式
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -52,7 +53,7 @@ async def translate_text(text):
             return text
         
         if detected_lang == 'en':
-            result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')  # format_='html'保持Markdown/粗体
+            result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')  # format_='html'保持粗体/Markdown
             translated = result['translatedText']
             print(f'翻译结果: {translated}')
             if translated == text:
@@ -85,8 +86,11 @@ async def on_message(message):
                 webhook = await message.channel.create_webhook(name=message.author.display_name)
                 try:
                     if mode == 'replace':
-                        await message.delete()
-                        print('原消息删除成功')
+                        try:
+                            await message.delete()
+                            print('原消息删除成功')
+                        except Exception as e:
+                            print(f'删除异常: {e}')
                         await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
                         print('Webhook代替发送成功')
                     elif mode == 'reply':
@@ -97,7 +101,10 @@ async def on_message(message):
             except discord.Forbidden as e:
                 print(f'Webhook权限失败: {e}，Fallback发送')
                 if mode == 'replace':
-                    await message.delete()
+                    try:
+                        await message.delete()
+                    except Exception as e:
+                        print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
                     await message.reply(f"**[{message.author.display_name}]** {translated}")
                 else:
@@ -105,7 +112,10 @@ async def on_message(message):
             except Exception as e:
                 print(f'Webhook异常: {e}，Fallback发送')
                 if mode == 'replace':
-                    await message.delete()
+                    try:
+                        await message.delete()
+                    except Exception as e:
+                        print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
                     await message.reply(f"**[{message.author.display_name}]** {translated}")
                 else:
@@ -122,7 +132,7 @@ async def on_ready():
         print(f'命令同步失败: {e}')
 
 @bot.tree.command(name='mode', description='设置频道翻译模式')
-@app.describe(mode='reply (回复翻译) / replace (删除代替) / off (关闭自动翻译)')
+@mode.describe(mode='reply (回复翻译) / replace (删除代替) / off (关闭自动翻译)')
 async def mode(interaction: discord.Interaction, mode: str):
     channel_id = interaction.channel.id
     if mode.lower() in ['reply', 'replace', 'off']:
