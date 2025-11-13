@@ -52,7 +52,7 @@ async def translate_text(text):
             return text
         
         if detected_lang == 'en':
-            result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')  # format_='html'保持粗体/Markdown
+            result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')  # format_='html'保持粗体/Markdown/换行
             translated = result['translatedText']
             print(f'翻译结果: {translated}')
             if translated == text:
@@ -93,8 +93,9 @@ async def on_message(message):
                         await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
                         print('Webhook代替发送成功')
                     elif mode == 'reply':
-                        await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None, reference=message)  # 回复原消息
-                        print('Webhook回复发送成功')
+                        # 直接发送翻译内容作为回复（不带Bot名，纯translated，保持格式）
+                        await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None, reference=message)
+                        print('Webhook回复发送成功 (纯翻译内容)')
                 finally:
                     await webhook.delete()
             except discord.Forbidden as e:
@@ -105,7 +106,7 @@ async def on_message(message):
                     except Exception as e:
                         print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
-                    await message.reply(f"**[{message.author.display_name}]** {translated}")
+                    await message.reply(translated)  # 直接reply translated，保持格式
                 else:
                     await message.channel.send(f"**[{message.author.display_name}]** {translated}")
             except Exception as e:
@@ -116,7 +117,7 @@ async def on_message(message):
                     except Exception as e:
                         print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
-                    await message.reply(f"**[{message.author.display_name}]** {translated}")
+                    await message.reply(translated)
                 else:
                     await message.channel.send(f"**[{message.author.display_name}]** {translated}")
     await bot.process_commands(message)
