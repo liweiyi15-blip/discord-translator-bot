@@ -64,10 +64,10 @@ def fetch_fmp_stock(symbol: str):
         data = response.json()
         if not data or len(data) == 0:
             return None
-        print(f"[DEBUG] FMP raw response: {data}")  # 打印 raw 诊断
+        print(f"[DEBUG] FMP stable quote raw: {data[0]}")  # 打印 raw 诊断
         return data[0]
     except Exception as e:
-        print(f"FMP 查询失败: {e}")
+        print(f"FMP stock 查询失败: {e}")
         return None
 
 def fetch_fmp_aftermarket(symbol: str):
@@ -82,8 +82,9 @@ def fetch_fmp_aftermarket(symbol: str):
             print(f"[DEBUG] FMP aftermarket 无数据")
             return None
         item = data[0]
+        print(f"[DEBUG] FMP aftermarket raw: {item}")  # 打印 raw
         if 'bidPrice' in item and item['bidPrice'] is not None and item['bidPrice'] > 0:
-            print(f"[DEBUG] FMP aftermarket bidPrice: {item['bidPrice']}")
+            print(f"[DEBUG] FMP aftermarket 使用 bidPrice: {item['bidPrice']}")
             return {"bidPrice": item['bidPrice']}
         print(f"[DEBUG] FMP aftermarket 无有效 bidPrice")
         return None
@@ -103,8 +104,9 @@ def fetch_fmp_premarket(symbol: str):
             print(f"[DEBUG] FMP premarket 无数据")
             return None
         item = data[0]
+        print(f"[DEBUG] FMP premarket raw: {item}")  # 打印 raw
         if 'bidPrice' in item and item['bidPrice'] is not None and item['bidPrice'] > 0:
-            print(f"[DEBUG] FMP premarket bidPrice: {item['bidPrice']}")
+            print(f"[DEBUG] FMP premarket 使用 bidPrice: {item['bidPrice']}")
             return {"bidPrice": item['bidPrice']}
         print(f"[DEBUG] FMP premarket 无有效 bidPrice")
         return None
@@ -172,14 +174,14 @@ async def stock(interaction: discord.Interaction, symbol: str):
 
         if extended_price:
             price_to_show = extended_price
-            # extended 涨跌: 相对 regular close
+            # extended 涨跌: 相对 regular close (stock_price 是上一个收盘价/regular close)
             if stock_price:
                 change_amount = extended_price - stock_price
                 change_pct = (change_amount / stock_price) * 100
             else:
                 change_amount = 0
                 change_pct = 0
-            print(f"使用 FMP 扩展时段数据: {symbol} - {price_to_show} (vs regular {stock_price}, change={change_amount:+.2f} ({change_pct:.2f}%)")
+            print(f"使用 FMP 扩展时段数据: {symbol} - {price_to_show} (vs regular close {stock_price}, change={change_amount:+.2f} ({change_pct:+.2f}%)")
             use_fallback = False  # 有 extended, 无备注
         elif fmp and stock_price:
             # 有 regular 但无 extended: fallback
