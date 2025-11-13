@@ -32,6 +32,17 @@ else:
 # per-channel模式: 'reply' (回复翻译), 'replace' (删除+代替), 'off' (关闭)
 channel_modes = {}
 
+def extract_text_from_message(message):
+    """提取消息文本，包括Embed内容"""
+    text = message.content or ""
+    if message.embeds:
+        for embed in message.embeds:
+            if embed.description:
+                text += "\n" + embed.description
+            for field in embed.fields:
+                text += "\n" + field.value
+    return text.strip()
+
 async def translate_text(text):
     if len(text.split()) < MIN_WORDS or re.search(r'[\u4e00-\u9fff]', text):
         print(f'跳过翻译: 短句或含中文 - {text}')
@@ -52,7 +63,7 @@ async def translate_text(text):
             return text
         
         if detected_lang == 'en':
-            result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')  # format_='html'保持粗体/Markdown/换行
+            result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')
             translated = result['translatedText']
             print(f'翻译结果: {translated}')
             if translated == text:
@@ -68,7 +79,10 @@ async def translate_text(text):
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user or message.webhook_id:
+    print(f'收到消息: {message.content} (频道: {message.channel.name}, 作者: {message.author.display_name}, 是Bot: {message.author.bot})')  # 诊断日志
+    
+    # 只忽略自己消息，不忽略转发Bot
+    if message.author == bot.user:
         return
     
     channel_id = message.channel.id
@@ -78,9 +92,11 @@ async def on_message(message):
         return  # 关闭自动翻译
     
     if isinstance(message.channel, discord.TextChannel):
-        translated = await translate_text(message.content)
+        text = extract_text_from_message(message)  # 提取内容 + Embed
+        print(f'提取文本: {text}')
+        translated = await translate_text(text)
         print(f'准备发送翻译: {translated}')
-        if translated and translated != message.content:
+        if translated and translated != text:
             try:
                 webhook = await message.channel.create_webhook(name=message.author.display_name)
                 try:
@@ -93,9 +109,8 @@ async def on_message(message):
                         await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
                         print('Webhook代替发送成功')
                     elif mode == 'reply':
-                        # 直接发送翻译内容作为回复（不带Bot名，纯translated，保持格式）
                         await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None, reference=message)
-                        print('Webhook回复发送成功 (纯翻译内容)')
+                        print('Webhook回复发送成功')
                 finally:
                     await webhook.delete()
             except discord.Forbidden as e:
@@ -106,7 +121,7 @@ async def on_message(message):
                     except Exception as e:
                         print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
-                    await message.reply(translated)  # 直接reply translated，保持格式
+                    await message.reply(translated)
                 else:
                     await message.channel.send(f"**[{message.author.display_name}]** {translated}")
             except Exception as e:
@@ -155,8 +170,9 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
     if message.author == bot.user:
         await interaction.response.send_message('不能翻译Bot消息', ephemeral=True)
         return
-    translated = await translate_text(message.content)
-    if translated == message.content:
+    text = extract_text_from_message(message)
+    translated = await translate_text(text)
+    if translated == text:
         await interaction.response.send_message('无需翻译（已是中文或太短）', ephemeral=True)
     else:
         await interaction.response.send_message(f'翻译：{translated}', ephemeral=True)
