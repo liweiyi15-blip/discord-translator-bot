@@ -15,7 +15,7 @@ intents.message_content = True  # 读消息内容
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 # 初始化翻译器（全局单例，高效）
-translator = GoogleTranslator(source='auto', target='zh')  # auto检测，zh=简中
+translator = GoogleTranslator(source='auto', target='zh-CN')  # auto检测，zh-CN=简中（修复语言代码）
 
 # 翻译函数：用deep-translator（自动检测+英翻中）
 async def translate_text(text):
@@ -23,12 +23,19 @@ async def translate_text(text):
         return text
     
     try:
-        # 翻译并检测：如果结果==原文本或检测为zh，则不翻
+        # 先检测语言
+        detected = translator.detect(text)
+        src_lang = detected.lang
+        
+        # 如果是中文（zh-CN/zh-TW）不翻译
+        if src_lang in ['zh-CN', 'zh-TW', 'zh']:
+            return text
+        
+        # 翻译
         translated = translator.translate(text)
         
-        # 简单检测：如果原文本含中文字符，或翻译前后相似，跳过
-        import re
-        if re.search(r'[\u4e00-\u9fff]', text) or translated == text:
+        # 如果翻译前后相似，跳过（防误翻）
+        if translated == text:
             return text
         
         return translated
