@@ -30,7 +30,15 @@ else:
     print('JSON Key 未设置')
     client = None
 
+# 全局标志避免循环翻译（Bot自己发的内容忽略1秒）
+translation_lock = {}
+
 async def translate_text(text):
+    # 忽略Bot自己刚发的翻译（避免循环）
+    if translation_lock.get(text, 0) > asyncio.get_event_loop().time() - 1:
+        print(f'忽略循环翻译: {text}')
+        return text
+    
     if len(text.split()) < MIN_WORDS or re.search(r'[\u4e00-\u9fff]', text):
         print(f'跳过翻译: 短句或含中文 - {text}')
         return text
@@ -56,6 +64,8 @@ async def translate_text(text):
             if translated == text:
                 print('翻译与原文相同，跳过')
                 return text
+            # 设置锁（1秒内忽略这个translated）
+            translation_lock[translated] = asyncio.get_event_loop().time()
             return translated
         else:
             print('非英文，跳过')
@@ -66,14 +76,16 @@ async def translate_text(text):
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user:
+    # 忽略Bot自己消息（包括Webhook模拟的）
+    if message.author == bot.user or message.webhook_id:
         return
+    
     if isinstance(message.channel, discord.TextChannel):
         translated = await translate_text(message.content)
         print(f'准备发送翻译: {translated}')
         if translated and translated != message.content:
             try:
-                # 删原消息（try-except防404）
+                # 删原消息
                 if DELETE_MODE:
                     try:
                         await message.delete()
