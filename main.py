@@ -1,14 +1,11 @@
 import discord
 from discord.ext import commands
-import aiohttp
 import asyncio
-import requests
 import os  # 用环境变量安全读取Token/Key
+from googletrans import Translator, LANGUAGES  # Google Translate库
 
 # 你的配置（用环境变量，Railway设置）
 TOKEN = os.getenv('DISCORD_TOKEN')  # 从Railway Variables读取
-OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')  # 从Railway Variables读取
-MODEL = 'deepseek/deepseek-chat:free'  # 免费DeepSeek最高版
 MIN_WORDS = 5  # 少于5字不翻译
 DELETE_MODE = True  # 默认开启删除原始消息（/toggle命令切换）
 
@@ -17,49 +14,33 @@ intents = discord.Intents.default()
 intents.message_content = True  # 读消息内容
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# API调用辅助函数
-async def call_openrouter(prompt):
-    if not OPENROUTER_API_KEY:
-        return None  # 防Key为空
-    headers = {
-        'Authorization': f'Bearer {OPENROUTER_API_KEY}',
-        'Content-Type': 'application/json'
-    }
-    data = {
-        'model': MODEL,
-        'messages': [{'role': 'user', 'content': prompt}]
-    }
-    async with aiohttp.ClientSession() as session:
-        async with session.post('https://openrouter.ai/api/v1/chat/completions', headers=headers, json=data) as resp:
-            if resp.status == 200:
-                result = await resp.json()
-                return result['choices'][0]['message']['content'].strip()
-            else:
-                print(f'API错误: {resp.status}')  # 调试用
-                return None
+# 初始化翻译器（全局单例，高效）
+translator = Translator()
 
-# 翻译函数：优化Prompt（更准、无废话）
+# 翻译函数：用Google Translate（自动检测+英翻中）
 async def translate_text(text):
     if len(text.split()) < MIN_WORDS:  # 少于5字返回原文本
         return text
     
     try:
-        # 优化语言检测：更精确prompt
-        lang_prompt = f"Analyze this text and respond ONLY with 'EN' if it's primarily English, or 'ZH' if Chinese (including simplified or traditional). No explanations. Text: {text}"
-        lang_response = await call_openrouter(lang_prompt)
+        # 检测语言
+        detected = translator.detect(text)
+        src_lang = detected.lang
         
-        if lang_response != 'EN':  # 非英文不翻译
+        # 如果是中文（zh-cn/zh-tw）不翻译
+        if src_lang in ['zh-cn', 'zh-tw', 'zh']:
             return text
         
-        # 优化翻译prompt：指定简体、自然、无额外
-        translate_prompt = f"Translate this English text to natural, concise Chinese (Simplified). Output ONLY the translation, nothing else. Text: {text}"
-        translated = await call_openrouter(translate_prompt)
-        
-        return translated if translated else f"翻译失败: {text}"
+        # 英文翻译成简体中文
+        if src_lang == 'en':
+            result = translator.translate(text, src='en', dest='zh-cn')
+            return result.text
+        else:
+            return text  # 非英不翻
         
     except Exception as e:
         print(f'翻译异常: {e}')  # 调试用
-        return text  # 出错返回原文本
+        return f"翻译失败: {text}"  # 出错返回原文本
 
 # 自动翻译：监听消息
 @bot.event
