@@ -2,7 +2,9 @@ import discord
 from discord.ext import commands
 import asyncio
 import os
+import json
 from google.cloud import translate_v2 as translate  # 官方SDK
+from google.oauth2 import service_account  # 认证模块
 import re
 
 # 配置
@@ -14,8 +16,13 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 初始化SDK（用Railway Variables的JSON认证）
-client = translate.Client()
+# 初始化SDK（从Railway Variables加载JSON内容）
+json_key = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+if json_key:
+    credentials = service_account.Credentials.from_service_account_info(json.loads(json_key))
+    client = translate.Client(credentials=credentials)
+else:
+    raise ValueError('GOOGLE_APPLICATION_CREDENTIALS 未设置！')
 
 async def translate_text(text):
     if len(text.split()) < MIN_WORDS or re.search(r'[\u4e00-\u9fff]', text):
@@ -33,7 +40,7 @@ async def translate_text(text):
         if detected_lang == 'en':
             result = client.translate(text, target_language='zh-CN')
             translated = result['translatedText']
-            if translated == text:
+            if translated == message.content:  # 防误翻
                 return text
             return translated
         else:
@@ -98,4 +105,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-
