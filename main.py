@@ -38,21 +38,21 @@ async def call_openrouter(prompt):
                 print(f'API错误: {resp.status}')  # 调试用
                 return None
 
-# 翻译函数：用OpenRouter API（用DeepSeek检测语言）
+# 翻译函数：优化Prompt（更准、无废话）
 async def translate_text(text):
     if len(text.split()) < MIN_WORDS:  # 少于5字返回原文本
         return text
     
     try:
-        # 用DeepSeek检测语言
-        lang_prompt = f"Detect the language of this text. Respond only with 'EN' if English, or 'ZH' if Chinese (simplified or traditional). Do not add extra text. Text: {text}"
+        # 优化语言检测：更精确prompt
+        lang_prompt = f"Analyze this text and respond ONLY with 'EN' if it's primarily English, or 'ZH' if Chinese (including simplified or traditional). No explanations. Text: {text}"
         lang_response = await call_openrouter(lang_prompt)
         
         if lang_response != 'EN':  # 非英文不翻译
             return text
         
-        # 英文翻译成中文
-        translate_prompt = f"Translate the following English text to Chinese (Simplified). Respond only with the translation, no extra text: {text}"
+        # 优化翻译prompt：指定简体、自然、无额外
+        translate_prompt = f"Translate this English text to natural, concise Chinese (Simplified). Output ONLY the translation, nothing else. Text: {text}"
         translated = await call_openrouter(translate_prompt)
         
         return translated if translated else f"翻译失败: {text}"
@@ -90,7 +90,7 @@ async def on_message(message):
     
     await bot.process_commands(message)  # 处理命令
 
-# Bot就绪事件：在这里同步命令（修复MissingApplicationID错误）
+# Bot就绪事件：在这里同步命令
 @bot.event
 async def on_ready():
     print(f'{bot.user} 已上线！')
