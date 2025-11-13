@@ -2,7 +2,8 @@ import discord
 from discord.ext import commands
 import asyncio
 import os  # 用环境变量安全读取Token/Key
-from deep_translator import GoogleTranslator  # Google Translate库（兼容3.13）
+import aiohttp  # 用aiohttp异步请求Google Translate
+import json  # 解析JSON响应
 
 # 你的配置（用环境变量，Railway设置）
 TOKEN = os.getenv('DISCORD_TOKEN')  # 从Railway Variables读取
@@ -14,28 +15,42 @@ intents = discord.Intents.default()
 intents.message_content = True  # 读消息内容
 bot = commands.Bot(command_prefix='!', intents=intents)
 
-# 初始化翻译器（全局单例，高效）
-translator = GoogleTranslator(source='auto', target='zh')  # auto检测，zh=简中
-
-# 翻译函数：用deep-translator（自动检测+英翻中）
+# 翻译函数：用aiohttp刮取Google Translate API（免费、无额外库）
 async def translate_text(text):
     if len(text.split()) < MIN_WORDS:  # 少于5字返回原文本
         return text
     
+    url = 'https://translate.google.com/translate_a/single'
+    params = {
+        'client': 'gtx',
+        'sl': 'auto',
+        'tl': 'zh-CN',  # 简体中文
+        'dt': 't',
+        'q': text
+    }
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+    }
+    
     try:
-        # 翻译并检测：如果结果==原文本或检测为zh，则不翻
-        translated = translator.translate(text)
-        
-        # 简单检测：如果原文本含中文字符，或翻译前后相似，跳过
-        import re
-        if re.search(r'[\u4e00-\u9fff]', text) or translated == text:
-            return text
-        
-        return translated
-        
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, params=params, headers=headers) as response:
+                if response.status == 200:
+                    data = await response.json()
+                    translated = data[0][0][0]
+                    detected_lang = data[2]  # 检测语言代码，如 'en' 或 'zh'
+                    
+                    # 如果是中文（zh包括简/繁）或翻译==原文本，不翻译
+                    if detected_lang.startswith('zh') or translated == text:
+                        return text
+                    
+                    return translated
+                else:
+                    print(f'Google API错误: {response.status}')  # 调试用
+                    return text
     except Exception as e:
         print(f'翻译异常: {e}')  # 调试用
-        return f"翻译失败: {text}"  # 出错返回原文本
+        return text  # 出错返回原文本
 
 # 自动翻译：监听消息
 @bot.event
