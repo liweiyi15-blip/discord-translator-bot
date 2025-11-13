@@ -4,7 +4,7 @@ import asyncio
 import os
 import json
 from google.cloud import translate_v2 as translate  # 官方SDK
-from google.oauth2 import service_account  # 认证模块
+from google.oauth2 import service_account  # 认证
 import re
 
 # 配置
@@ -40,7 +40,7 @@ async def translate_text(text):
         if detected_lang == 'en':
             result = client.translate(text, target_language='zh-CN')
             translated = result['translatedText']
-            if translated == message.content:  # 防误翻
+            if translated == text:
                 return text
             return translated
         else:
