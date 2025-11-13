@@ -4,10 +4,11 @@ import aiohttp
 import asyncio
 import requests
 from langdetect import detect, LangDetectException
+import os  # 新增：用环境变量安全读取Token/Key
 
-# 你的配置
-TOKEN = 'YOUR_TOKEN'  # 从步骤1复制
-OPENROUTER_API_KEY = 'YOUR_OPENROUTER_API_KEY'  # OpenRouter的API Key
+# 你的配置（用环境变量，Railway设置）
+TOKEN = os.getenv('DISCORD_TOKEN')  # 从Railway Variables读取
+OPENROUTER_API_KEY = os.getenv('OPENROUTER_API_KEY')  # 从Railway Variables读取
 MODEL = 'deepseek/deepseek-chat:free'  # 免费DeepSeek最高版
 MIN_WORDS = 5  # 少于5字不翻译
 DELETE_MODE = True  # 默认开启删除原始消息（/toggle命令切换）
@@ -65,9 +66,9 @@ async def on_message(message):
             try:
                 if DELETE_MODE:
                     await message.delete()  # 删除原消息
-                    await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url)
+                    await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
                 else:
-                    await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url)
+                    await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
             finally:
                 await webhook.delete()  # 清理webhook
     
@@ -82,8 +83,7 @@ async def toggle(interaction: discord.Interaction):
     await interaction.response.send_message(f'删除原始消息模式已{status}（关闭时会在原消息下回复翻译）', ephemeral=True)
 
 # 右键菜单：主动翻译（只操作者可见）
-@bot.tree.command(name='translate_message', description='翻译此消息')  # 改成slash子命令，避免context_menu复杂
-@app.commands.describe(message='要翻译的消息')
+@bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     if message.author == bot.user:
         await interaction.response.send_message('不能翻译Bot消息', ephemeral=True)
@@ -94,8 +94,6 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
         await interaction.response.send_message('无需翻译（已是中文或太短）', ephemeral=True)
     else:
         await interaction.response.send_message(f'翻译：{translated}', ephemeral=True)  # 只自己看到
-
-# 注意：右键功能用slash reply消息实现（/translate_message @消息），简单版；想纯右键后问我优化
 
 # 启动Bot
 async def main():
