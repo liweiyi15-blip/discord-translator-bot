@@ -2,12 +2,13 @@ import discord
 from discord.ext import commands
 import asyncio
 import os
-import requests  # REST API
+import json
+from google.cloud import translate_v2 as translate
+from google.oauth2 import service_account
 import re
 
 # 配置
 TOKEN = os.getenv('DISCORD_TOKEN')
-GOOGLE_KEY = os.getenv('GOOGLE_TRANSLATE_API_KEY')  # 你的API Key
 MIN_WORDS = 5
 DELETE_MODE = True
 
@@ -15,31 +16,54 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# 初始化SDK
+json_key = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+if json_key:
+    try:
+        credentials = service_account.Credentials.from_service_account_info(json.loads(json_key))
+        client = translate.Client(credentials=credentials)
+        print('SDK初始化成功')
+    except Exception as e:
+        print(f'SDK初始化失败: {e}')
+        client = None
+else:
+    print('JSON Key 未设置')
+    client = None
+
 async def translate_text(text):
     if len(text.split()) < MIN_WORDS or re.search(r'[\u4e00-\u9fff]', text):
+        print(f'跳过翻译: 短句或含中文 - {text}')
         return text
     
-    url = f'https://translation.googleapis.com/language/translate/v2?key={GOOGLE_KEY}'
-    data = {
-        'q': text,
-        'source': 'en',
-        'target': 'zh-CN',
-        'format': 'text'
-    }
+    if not client:
+        print('SDK未初始化，跳过翻译')
+        return text
     
     try:
-        response = requests.post(url, json=data)
-        if response.status_code == 200:
-            result = response.json()
-            translated = result['data']['translations'][0]['translatedText']
+        print(f'翻译调用: {text}')
+        # 检测语言
+        detection = client.detect_language(text)
+        detected_lang = detection['language']
+        print(f'检测语言: {detected_lang}')
+        
+        if detected_lang.startswith('zh'):
+            print('检测为中文，跳过')
+            return text
+        
+        # 翻译英→简中
+        if detected_lang == 'en':
+            result = client.translate(text, source_language='en', target_language='zh-CN')
+            translated = result['translatedText']
+            print(f'翻译结果: {translated}')
             if translated == text:
+                print('翻译与原文相同，跳过')
                 return text
             return translated
         else:
-            print(f'Google API错误: {response.status_code}')
+            print('非英文，跳过')
             return text
     except Exception as e:
-        print(f'翻译异常: {e}')
+        print(f'翻译异常详情: {e}')
         return text
 
 @bot.event
