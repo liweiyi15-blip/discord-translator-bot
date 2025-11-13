@@ -41,7 +41,6 @@ async def translate_text(text):
     
     try:
         print(f'翻译调用: {text}')
-        # 检测语言
         detection = client.detect_language(text)
         detected_lang = detection['language']
         print(f'检测语言: {detected_lang}')
@@ -50,7 +49,6 @@ async def translate_text(text):
             print('检测为中文，跳过')
             return text
         
-        # 翻译英→简中
         if detected_lang == 'en':
             result = client.translate(text, source_language='en', target_language='zh-CN')
             translated = result['translatedText']
@@ -72,6 +70,7 @@ async def on_message(message):
         return
     if isinstance(message.channel, discord.TextChannel):
         translated = await translate_text(message.content)
+        print(f'准备发送翻译: {translated}')
         if translated and translated != message.content:
             try:
                 webhook = await message.channel.create_webhook(name=message.author.display_name)
@@ -81,9 +80,19 @@ async def on_message(message):
                         await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
                     else:
                         await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
+                    print('Webhook发送成功: 翻译文本')
                 finally:
                     await webhook.delete()
-            except discord.Forbidden:
+            except discord.Forbidden as e:
+                print(f'Webhook权限失败: {e}，Fallback发送翻译')
+                # Fallback: 用translated发送
+                if DELETE_MODE:
+                    await message.delete()
+                await message.channel.send(f"**[{message.author.display_name}]** {translated}")
+            except Exception as e:
+                print(f'Webhook异常: {e}，Fallback发送翻译')
+                if DELETE_MODE:
+                    await message.delete()
                 await message.channel.send(f"**[{message.author.display_name}]** {translated}")
     await bot.process_commands(message)
 
