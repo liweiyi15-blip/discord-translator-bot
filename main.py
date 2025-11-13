@@ -73,26 +73,28 @@ async def on_message(message):
         print(f'准备发送翻译: {translated}')
         if translated and translated != message.content:
             try:
+                # 删原消息（try-except防404）
+                if DELETE_MODE:
+                    try:
+                        await message.delete()
+                        print('原消息删除成功')
+                    except discord.NotFound:
+                        print('原消息已不存在，跳过删除')
+                    except Exception as e:
+                        print(f'删除异常: {e}')
+                
+                # Webhook发送翻译
                 webhook = await message.channel.create_webhook(name=message.author.display_name)
                 try:
-                    if DELETE_MODE:
-                        await message.delete()
-                        await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
-                    else:
-                        await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
+                    await webhook.send(translated, username=message.author.display_name, avatar_url=message.author.avatar.url if message.author.avatar else None)
                     print('Webhook发送成功: 翻译文本')
                 finally:
                     await webhook.delete()
             except discord.Forbidden as e:
                 print(f'Webhook权限失败: {e}，Fallback发送翻译')
-                # Fallback: 用translated发送
-                if DELETE_MODE:
-                    await message.delete()
                 await message.channel.send(f"**[{message.author.display_name}]** {translated}")
             except Exception as e:
                 print(f'Webhook异常: {e}，Fallback发送翻译')
-                if DELETE_MODE:
-                    await message.delete()
                 await message.channel.send(f"**[{message.author.display_name}]** {translated}")
     await bot.process_commands(message)
 
