@@ -10,7 +10,7 @@ import re
 # 配置
 TOKEN = os.getenv('DISCORD_TOKEN')
 MIN_WORDS = 5
-DELETE_MODE = True  # 默认replace模式
+DELETE_MODE = True
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -44,25 +44,14 @@ async def translate_text(text):
     
     try:
         print(f'翻译调用: {text}')
-        detection = client.detect_language(text)
-        detected_lang = detection['language']
-        print(f'检测语言: {detected_lang}')
-        
-        if detected_lang.startswith('zh'):
-            print('检测为中文，跳过')
+        # 强制英文源，防误判
+        result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')
+        translated = result['translatedText']
+        print(f'翻译结果: {translated}')
+        if translated == text:
+            print('翻译与原文相同，跳过')
             return text
-        
-        if detected_lang == 'en':
-            result = client.translate(text, source_language='en', target_language='zh-CN', format_='html')  # format_='html'保持粗体/Markdown
-            translated = result['translatedText']
-            print(f'翻译结果: {translated}')
-            if translated == text:
-                print('翻译与原文相同，跳过')
-                return text
-            return translated
-        else:
-            print('非英文，跳过')
-            return text
+        return translated
     except Exception as e:
         print(f'翻译异常详情: {e}')
         return text
@@ -99,25 +88,25 @@ async def on_message(message):
                 finally:
                     await webhook.delete()
             except discord.Forbidden as e:
-                print(f'Webhook权限失败: {e}，Fallback发送')
+                print(f'Webhook权限失败: {e}，Fallback发送翻译')
                 if mode == 'replace':
                     try:
                         await message.delete()
                     except Exception as e:
                         print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
-                    await message.reply(f"**[{message.author.display_name}]** {translated}")
+                    await message.reply(translated)  # 直接reply translated
                 else:
                     await message.channel.send(f"**[{message.author.display_name}]** {translated}")
             except Exception as e:
-                print(f'Webhook异常: {e}，Fallback发送')
+                print(f'Webhook异常: {e}，Fallback发送翻译')
                 if mode == 'replace':
                     try:
                         await message.delete()
                     except Exception as e:
                         print(f'Fallback删除异常: {e}')
                 if mode == 'reply':
-                    await message.reply(f"**[{message.author.display_name}]** {translated}")
+                    await message.reply(translated)
                 else:
                     await message.channel.send(f"**[{message.author.display_name}]** {translated}")
     await bot.process_commands(message)
@@ -160,4 +149,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-    
