@@ -222,6 +222,11 @@ async def on_message(message):
     if message.author == bot.user:
         return
     
+    # 新增：忽略所有Webhook消息，防止自己发送的翻译消息被重新处理，导致循环
+    if message.webhook_id is not None:
+        print('忽略Webhook消息')
+        return
+    
     channel_id = message.channel.id
     mode = channel_modes.get(channel_id, 'replace')
     
@@ -236,6 +241,9 @@ async def on_message(message):
         if parts['content'] == message.content and not parts['embeds']:
             print('无翻译变化，跳过')
             return
+        
+        # 可选增强：如果有embeds，也检查是否真正变化（例如，比较翻译前后embeds的字符串表示）
+        # 但当前简化版已足够；如果embeds翻译后相同，仍会发送，但因webhook_id将被忽略，不会循环
         
         try:
             webhook = await message.channel.create_webhook(name=message.author.display_name)
@@ -260,7 +268,10 @@ async def on_message(message):
                     for field in embed_data['fields']:
                         new_embed.add_field(name=field['name'], value=field['value'], inline=field['inline'])
                     if parts['content']:
-                        new_embed.description += f"\n\n{parts['content']}"
+                        if new_embed.description:
+                            new_embed.description += f"\n\n{parts['content']}"
+                        else:
+                            new_embed.description = parts['content']
                     await message.channel.send(embed=new_embed, reference=message if mode == 'reply' else None)
             else:
                 await message.channel.send(parts['content'], reference=message if mode == 'reply' else None)
