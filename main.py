@@ -62,7 +62,7 @@ def extract_and_translate_parts(message):
             embed_data['description'] = translate_text(embed_data['description'])
         
         # 翻译每个field的name和value
-        for field in embed.fields:
+        for field in embed. fields:
             field_data = {
                 'name': translate_text(field.name) if field.name else "",
                 'value': translate_text(field.value) if field.value else "",
@@ -224,9 +224,10 @@ async def on_message(message):
         print('忽略: 自己消息')
         return
     
-    if message.webhook_id is not None:
-        print('忽略Webhook消息')
-        return
+    # 注释掉 webhook 忽略逻辑，以允许其他来源的 webhook 消息（如美股仙人）
+    # if message.webhook_id is not None:
+    #     print('忽略Webhook消息')
+    #     return
     
     channel_id = message.channel.id
     mode = channel_modes.get(channel_id, 'replace')
