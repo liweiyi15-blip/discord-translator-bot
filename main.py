@@ -76,6 +76,7 @@ def extract_and_translate_parts(message):
 
 def translate_text(text):
     """翻译单个文本片段（支持HTML格式），新增: 保持结构（换行、bullet）"""
+    print(f'进入 translate_text: 词数={len(text.split())}')  # 调试
     if len(text.split()) < MIN_WORDS or re.search(r'[\u4e00-\u9fff]', text):
         print(f'跳过翻译: 短句或含中文 - {text[:50]}...')
         return text
@@ -140,7 +141,7 @@ def _raw_translate(text):
         print(f'翻译调用: {text[:50]}...')
         detection = client.detect_language(text)
         detected_lang = detection['language']
-        print(f'检测语言: {detected_lang}')
+        print(f'检测语言: {detected_lang}')  # 调试
         
         if detected_lang.startswith('zh'):
             print('检测为中文，跳过')
@@ -214,83 +215,72 @@ async def send_translated_content(webhook, parts, author, mode, original_message
                 full_text += f"\n**{field['name']}**: {field['value']}"
         await webhook.send(full_text, username=author.display_name, avatar_url=author.avatar.url if author.avatar else None)
 
-# on_message 事件（不变，但用新parts）
+# on_message 事件（增强调试版）
 @bot.event
 async def on_message(message):
     print(f'收到消息: {message.content[:50]}... (频道: {message.channel.name}, 作者: {message.author.display_name}, 是Bot: {message.author.bot})')
     
     if message.author == bot.user:
+        print('忽略: 自己消息')
         return
     
-    # 新增：忽略所有Webhook消息，防止自己发送的翻译消息被重新处理，导致循环
     if message.webhook_id is not None:
         print('忽略Webhook消息')
         return
     
     channel_id = message.channel.id
     mode = channel_modes.get(channel_id, 'replace')
+    print(f'调试: 模式={mode}')
     
     if mode == 'off':
+        print('忽略: 模式为off')
         return
     
-    if isinstance(message.channel, discord.TextChannel):
-        parts = extract_and_translate_parts(message)
-        print(f'翻译后内容预览: {parts["content"][:100]}...')
-        
-        # 检查变化（简化）
-        content_changed = parts['content'] != message.content
-        embed_changed = False
-        if message.embeds:
-            # 简单检查Embed是否变化（假设顺序匹配）
-            if len(parts['embeds']) != len(message.embeds):
-                embed_changed = True
-            else:
-                for orig_embed, trans_embed in zip(message.embeds, parts['embeds']):
-                    if (trans_embed['title'] != (orig_embed.title or "")) or \
-                       (trans_embed['description'] != (orig_embed.description or "")) or \
-                       any((f['name'] != (field.name or "") or f['value'] != (field.value or "")) for f, field in zip(trans_embed['fields'], orig_embed.fields)):
-                        embed_changed = True
-                        break
-        
-        if not content_changed and not embed_changed:
-            print('无翻译变化，跳过')
-            return
-        
+    if not isinstance(message.channel, discord.TextChannel):
+        print(f'忽略: 非TextChannel - 类型={type(message.channel)}')
+        return
+    
+    print(f'调试: 进入处理 - 词数={len(message.content.split())}, 有中文={bool(re.search(r"[\u4e00-\u9fff]", message.content))}')
+    
+    # 临时：打印原始 content
+    print(f'调试: 原始 content = {repr(message.content[:200])}...')  # 用repr显示隐藏字符
+    
+    parts = extract_and_translate_parts(message)
+    print(f'翻译后 content = {parts["content"][:100]}...')
+    
+    # 详细变化检查（纯文本）
+    content_changed = parts['content'] != message.content
+    print(f'调试: content 变化? {content_changed} (len orig={len(message.content)}, len new={len(parts["content"])})')
+    
+    if not content_changed:
+        print('无翻译变化，跳过')
+        await bot.process_commands(message)
+        return
+    
+    print(f'调试: 有变化，发送...')
+    
+    # 发送代码
+    try:
+        webhook = await message.channel.create_webhook(name=message.author.display_name)
         try:
-            webhook = await message.channel.create_webhook(name=message.author.display_name)
-            try:
-                if mode == 'replace':
-                    await message.delete()
-                    print('原消息删除成功')
-                await send_translated_content(webhook, parts, message.author, mode, message if mode == 'reply' else None)
-                print('Webhook发送成功（翻译结束）')
-            finally:
-                await webhook.delete()
-        except discord.Forbidden as e:
-            print(f'Webhook权限失败: {e}，Fallback发送')
             if mode == 'replace':
                 await message.delete()
-            # Fallback: 用bot发送（支持reference）
-            if parts['embeds']:
-                for embed_data in parts['embeds']:
-                    new_embed = discord.Embed(title=embed_data['title'], description=embed_data['description'], color=embed_data['color'])
-                    if embed_data['author']['name']:
-                        new_embed.set_author(name=embed_data['author']['name'], icon_url=embed_data['author']['icon_url'])
-                    for field in embed_data['fields']:
-                        new_embed.add_field(name=field['name'], value=field['value'], inline=field['inline'])
-                    if parts['content']:
-                        if new_embed.description:
-                            new_embed.description += f"\n\n{parts['content']}"
-                        else:
-                            new_embed.description = parts['content']
-                    await message.channel.send(embed=new_embed, reference=message if mode == 'reply' else None)
-            else:
-                await message.channel.send(parts['content'], reference=message if mode == 'reply' else None)
-        except Exception as e:
-            print(f'异常: {e}，Fallback发送')
-            if mode == 'replace':
-                await message.delete()
-            await message.channel.send(f"**[{message.author.display_name}]** {parts['content']}", reference=message if mode == 'reply' else None)
+                print('原消息删除成功')
+            await send_translated_content(webhook, parts, message.author, mode, message if mode == 'reply' else None)
+            print('Webhook发送成功（翻译结束）')
+        finally:
+            await webhook.delete()
+    except discord.Forbidden as e:
+        print(f'Webhook权限失败: {e}，Fallback发送')
+        if mode == 'replace':
+            await message.delete()
+        await message.channel.send(parts['content'], reference=message if mode == 'reply' else None)
+    except Exception as e:
+        print(f'异常: {e}，Fallback发送')
+        if mode == 'replace':
+            await message.delete()
+        await message.channel.send(f"**[{message.author.display_name}]** {parts['content']}", reference=message if mode == 'reply' else None)
+    
     await bot.process_commands(message)
 
 # 其他事件和命令不变（on_ready, slash commands, context menu）
