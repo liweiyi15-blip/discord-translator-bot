@@ -238,12 +238,23 @@ async def on_message(message):
         print(f'翻译后内容预览: {parts["content"][:100]}...')
         
         # 检查变化（简化）
-        if parts['content'] == message.content and not parts['embeds']:
+        content_changed = parts['content'] != message.content
+        embed_changed = False
+        if message.embeds:
+            # 简单检查Embed是否变化（假设顺序匹配）
+            if len(parts['embeds']) != len(message.embeds):
+                embed_changed = True
+            else:
+                for orig_embed, trans_embed in zip(message.embeds, parts['embeds']):
+                    if (trans_embed['title'] != (orig_embed.title or "")) or \
+                       (trans_embed['description'] != (orig_embed.description or "")) or \
+                       any((f['name'] != (field.name or "") or f['value'] != (field.value or "")) for f, field in zip(trans_embed['fields'], orig_embed.fields)):
+                        embed_changed = True
+                        break
+        
+        if not content_changed and not embed_changed:
             print('无翻译变化，跳过')
             return
-        
-        # 可选增强：如果有embeds，也检查是否真正变化（例如，比较翻译前后embeds的字符串表示）
-        # 但当前简化版已足够；如果embeds翻译后相同，仍会发送，但因webhook_id将被忽略，不会循环
         
         try:
             webhook = await message.channel.create_webhook(name=message.author.display_name)
@@ -252,7 +263,7 @@ async def on_message(message):
                     await message.delete()
                     print('原消息删除成功')
                 await send_translated_content(webhook, parts, message.author, mode, message if mode == 'reply' else None)
-                print('Webhook发送成功')
+                print('Webhook发送成功（翻译结束）')
             finally:
                 await webhook.delete()
         except discord.Forbidden as e:
