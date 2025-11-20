@@ -8,7 +8,7 @@ from google.oauth2 import service_account
 import re
 import functools
 
-# ==================== 配置 ====================
+# ==================== 配置区域 ====================
 TOKEN = os.getenv('DISCORD_TOKEN')
 MIN_WORDS = 5
 
@@ -169,7 +169,7 @@ async def send_translated_content(webhook, parts, author, mode, original_message
                 embed.add_field(name=f['name'], value=f['value'], inline=f['inline'])
             embeds.append(embed)
         
-        # 如果同时有正文和 Embed，把正文拼接到第一个 Embed 的描述中（你的原有逻辑）
+        # 如果同时有正文和 Embed，把正文拼接到第一个 Embed 的描述中
         if content and embeds:
             desc = embeds[0].description or ""
             embeds[0].description = desc + ("\n\n" + content if desc else content)
@@ -190,13 +190,16 @@ async def send_translated_content(webhook, parts, author, mode, original_message
 @bot.event
 async def on_ready():
     print(f'{bot.user} 已上线！')
-    synced = await bot.tree.sync()
-    print(f'同步了 {len(synced)} 个命令')
+    try:
+        synced = await bot.tree.sync()
+        print(f'同步了 {len(synced)} 个命令')
+    except Exception as e:
+        print(f'同步命令失败: {e}')
 
 @bot.event
 async def on_message(message):
-    # 1. 忽略自己和 Webhook 消息（防止死循环）
-    if message.author == bot.user or message.webhook_id:
+    # 1. 只忽略 Bot 自身（保留其他 Bot 和 Webhook）
+    if message.author == bot.user:
         return
 
     # 2. 检查频道模式
@@ -208,9 +211,14 @@ async def on_message(message):
         return
 
     # 3. 异步提取和翻译
-    parts = await extract_and_translate_parts(message)
+    try:
+        parts = await extract_and_translate_parts(message)
+    except Exception as e:
+        print(f"提取消息错误: {e}")
+        return
     
-    # 4. 检查是否发生变化（无变化则不处理）
+    # 4. 检查是否发生变化（这是防止死循环的关键）
+    # 如果 Google 认为已经是中文，translate_text_sync 返回原文本 -> content_changed 为 False -> return
     content_changed = parts['content'] != (message.content or "")
     embed_changed = False
     if parts['embeds']:
@@ -231,12 +239,17 @@ async def on_message(message):
     try:
         if webhook:
             if mode == 'replace':
-                await message.delete()
+                try:
+                    await message.delete()
+                except discord.Forbidden:
+                    pass # 无法删除也没关系，继续发送
             await send_translated_content(webhook, parts, message.author, mode, message)
         else:
             # 如果无法创建 Webhook，回退到普通回复
             if mode == 'replace':
-                await message.delete()
+                try:
+                    await message.delete()
+                except: pass
             await message.channel.send(f"**[{message.author.display_name}]**: {parts['content']}")
             
     except discord.Forbidden:
@@ -265,13 +278,22 @@ async def off_mode(interaction: discord.Interaction):
 
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
-    if message.author.bot:
-        await interaction.response.send_message('机器人消息不翻译', ephemeral=True)
-        return
+    # 已删除对 Bot 的屏蔽，现在可以翻译任何消息
+    await interaction.response.defer(ephemeral=True) # 使用 defer 防止处理超时
     
-    # 复用异步翻译逻辑
-    parts = await extract_and_translate_parts(message)
-    await interaction.response.send_message(f"翻译结果：\n{parts['content']}", ephemeral=True)
+    try:
+        parts = await extract_and_translate_parts(message)
+        result_text = parts['content']
+        
+        # 如果有 embed，简单附加一下（右键翻译主要看内容）
+        if parts['embeds']:
+            for em in parts['embeds']:
+                if em['description']:
+                    result_text += f"\n\n[Embed]: {em['description']}"
+                    
+        await interaction.followup.send(f"翻译结果：\n{result_text}", ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"翻译失败: {e}", ephemeral=True)
 
 # ==================== 启动 ====================
 
