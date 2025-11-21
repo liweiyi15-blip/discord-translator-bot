@@ -11,7 +11,7 @@ import functools
 # ==================== 配置区域 ====================
 TOKEN = os.getenv('DISCORD_TOKEN')
 MIN_WORDS = 5
-DEBUG = True  # 开启调试日志
+DEBUG = True  # 开启详细日志
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -38,17 +38,15 @@ webhook_cache = {}
 # ==================== 核心功能函数 ====================
 
 def log(message):
-    """简单的日志辅助函数"""
     if DEBUG:
         print(message)
 
 def translate_text_sync(text):
     """同步翻译核心逻辑"""
     if len(text.split()) < MIN_WORDS:
-        return text # 字数太少不打印日志，避免刷屏
+        return text
         
     if re.search(r'[\u4e00-\u9fff]', text):
-        # log(f"   -> 检测到中文，跳过")
         return text
     
     # 保护 @提及
@@ -72,12 +70,10 @@ def translate_text_sync(text):
     try:
         if not client: return text
         
-        # 检测语言
         detection = client.detect_language(text)
         if detection['language'].startswith('zh'):
             return text
             
-        # log(f"   -> 调用 Google 翻译...")
         result = client.translate(
             text, 
             source_language='en', 
@@ -142,13 +138,19 @@ async def get_webhook(channel):
         return None
 
 async def send_translated_content(webhook, parts, author, mode, original_message):
+    """
+    发送逻辑修正版：正文和 Embed 分离发送，不合并。
+    """
     send_kwargs = {
         'username': author.display_name,
         'avatar_url': author.avatar.url if author.avatar else None,
         'wait': True
     }
+    
     content = parts['content']
     embeds = []
+    
+    # 构建 Embed 对象列表
     if parts['embeds']:
         for ed in parts['embeds']:
             embed = discord.Embed(title=ed['title'], description=ed['description'], color=ed['color'])
@@ -157,15 +159,13 @@ async def send_translated_content(webhook, parts, author, mode, original_message
             for f in ed['fields']:
                 embed.add_field(name=f['name'], value=f['value'], inline=f['inline'])
             embeds.append(embed)
-        if content and embeds:
-            desc = embeds[0].description or ""
-            embeds[0].description = desc + ("\n\n" + content if desc else content)
-            content = None 
-    
-    if embeds:
-        await webhook.send(content=content, embeds=embeds, **send_kwargs)
-    elif content:
-        await webhook.send(content=content, **send_kwargs)
+
+    # 核心修正：同时传入 content 和 embeds，Discord 会自动处理排版
+    if content or embeds:
+        try:
+            await webhook.send(content=content, embeds=embeds, **send_kwargs)
+        except Exception as e:
+            print(f"❌ 发送具体内容失败: {e}")
 
 # ==================== 事件处理 ====================
 
@@ -202,7 +202,7 @@ async def on_message(message):
         print(f"❌ 提取失败: {e}")
         return
     
-    # 3. 变动检测
+    # 3. 变动检测 (防死循环)
     content_changed = parts['content'] != (message.content or "")
     embed_changed = False
     if parts['embeds']:
@@ -226,10 +226,12 @@ async def on_message(message):
             if mode == 'replace':
                 try:
                     await message.delete()
-                except: pass # 删不掉就算了
+                except: pass 
+            
             await send_translated_content(webhook, parts, message.author, mode, message)
             log(f"✅ 转发成功 (Webhook)")
         else:
+            # 降级处理：没有 webhook 时的发送
             if mode == 'replace':
                 try: await message.delete()
                 except: pass
