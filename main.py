@@ -43,7 +43,9 @@ def log(message):
 
 def translate_text_sync(text):
     """同步翻译核心逻辑"""
-    if len(text.split()) < MIN_WORDS:
+    if not text: return ""
+    # 如果只有链接或数字，不翻译
+    if len(text.split()) < 1 and not len(text) > 10: 
         return text
         
     if re.search(r'[\u4e00-\u9fff]', text):
@@ -96,6 +98,9 @@ async def async_translate_text(text):
     return await loop.run_in_executor(None, functools.partial(translate_text_sync, text))
 
 async def extract_and_translate_parts(message):
+    """
+    提取并翻译消息内容，同时保留 Embed 的结构和图片信息
+    """
     parts = {'content': message.content or "", 'embeds': []}
     if parts['content']:
         parts['content'] = await async_translate_text(parts['content'])
@@ -105,10 +110,18 @@ async def extract_and_translate_parts(message):
             'title': await async_translate_text(embed.title) if embed.title else "",
             'description': await async_translate_text(embed.description) if embed.description else "",
             'color': embed.color.value if embed.color else None,
+            'url': embed.url, # 保留标题链接
+            'timestamp': embed.timestamp, # 保留时间戳
             'author': {
                 'name': embed.author.name if embed.author else None,
                 'icon_url': embed.author.icon_url if embed.author else None
             },
+            'footer': {
+                'text': await async_translate_text(embed.footer.text) if embed.footer and embed.footer.text else None,
+                'icon_url': embed.footer.icon_url if embed.footer else None
+            },
+            'image': embed.image.url if embed.image else None,
+            'thumbnail': embed.thumbnail.url if embed.thumbnail else None,
             'fields': []
         }
         for field in embed.fields:
@@ -119,6 +132,37 @@ async def extract_and_translate_parts(message):
             })
         parts['embeds'].append(embed_data)
     return parts
+
+def rebuild_embeds(embed_data_list):
+    """
+    根据翻译后的数据重建 Discord Embed 对象列表
+    """
+    embeds = []
+    for ed in embed_data_list:
+        embed = discord.Embed(
+            title=ed['title'], 
+            description=ed['description'], 
+            color=ed['color'],
+            url=ed['url'],
+            timestamp=ed['timestamp']
+        )
+        
+        if ed['author']['name']:
+            embed.set_author(name=ed['author']['name'], icon_url=ed['author']['icon_url'])
+            
+        if ed['footer']['text']:
+            embed.set_footer(text=ed['footer']['text'], icon_url=ed['footer']['icon_url'])
+            
+        if ed['image']:
+            embed.set_image(url=ed['image'])
+            
+        if ed['thumbnail']:
+            embed.set_thumbnail(url=ed['thumbnail'])
+
+        for f in ed['fields']:
+            embed.add_field(name=f['name'], value=f['value'], inline=f['inline'])
+        embeds.append(embed)
+    return embeds
 
 async def get_webhook(channel):
     if channel.id in webhook_cache:
@@ -138,9 +182,6 @@ async def get_webhook(channel):
         return None
 
 async def send_translated_content(webhook, parts, author, mode, original_message):
-    """
-    发送逻辑修正版：正文和 Embed 分离发送，不合并。
-    """
     send_kwargs = {
         'username': author.display_name,
         'avatar_url': author.avatar.url if author.avatar else None,
@@ -148,19 +189,8 @@ async def send_translated_content(webhook, parts, author, mode, original_message
     }
     
     content = parts['content']
-    embeds = []
-    
-    # 构建 Embed 对象列表
-    if parts['embeds']:
-        for ed in parts['embeds']:
-            embed = discord.Embed(title=ed['title'], description=ed['description'], color=ed['color'])
-            if ed['author']['name']:
-                embed.set_author(name=ed['author']['name'], icon_url=ed['author']['icon_url'])
-            for f in ed['fields']:
-                embed.add_field(name=f['name'], value=f['value'], inline=f['inline'])
-            embeds.append(embed)
+    embeds = rebuild_embeds(parts['embeds'])
 
-    # 核心修正：同时传入 content 和 embeds，Discord 会自动处理排版
     if content or embeds:
         try:
             await webhook.send(content=content, embeds=embeds, **send_kwargs)
@@ -186,9 +216,17 @@ async def on_message(message):
 
     # 2. 检查模式
     channel_id = message.channel.id
-    mode = channel_modes.get(channel_id, 'replace')
-    if mode == 'off':
+    mode = channel_modes.get(channel_id, 'replace') # 默认为 replace，但在逻辑里如果没有 explicitly set 且不是 command 可能会需要调整
+    
+    # 这里的逻辑是：如果没有开启过，默认为 off (你可以改为默认开启)
+    # 现有的代码逻辑：如果 key 不存在，返回 'replace'。如果你希望默认不翻译，请把 dict.get 的默认值改为 'off'
+    # 为了符合“开启命令”的逻辑，这里建议默认 'off'，只有使用了 /start_translate 或者是之前的命令才开启
+    current_mode = channel_modes.get(channel_id, 'off') 
+
+    if current_mode == 'off':
+        await bot.process_commands(message)
         return
+
     if not isinstance(message.channel, discord.TextChannel):
         return
 
@@ -208,6 +246,7 @@ async def on_message(message):
     if parts['embeds']:
         orig_embed = message.embeds[0]
         trans_embed = parts['embeds'][0]
+        # 简单比对 Title 和 Description
         if (trans_embed['title'] != (orig_embed.title or "")) or \
            (trans_embed['description'] != (orig_embed.description or "")):
             embed_changed = True
@@ -223,19 +262,22 @@ async def on_message(message):
     
     try:
         if webhook:
-            if mode == 'replace':
+            if current_mode == 'replace':
                 try:
                     await message.delete()
                 except: pass 
             
-            await send_translated_content(webhook, parts, message.author, mode, message)
+            await send_translated_content(webhook, parts, message.author, current_mode, message)
             log(f"✅ 转发成功 (Webhook)")
         else:
-            # 降级处理：没有 webhook 时的发送
-            if mode == 'replace':
+            # 降级处理
+            if current_mode == 'replace':
                 try: await message.delete()
                 except: pass
-            await message.channel.send(f"**[{message.author.display_name}]**: {parts['content']}")
+            
+            # 普通发送无法伪造头像，只能发送文字
+            embeds = rebuild_embeds(parts['embeds'])
+            await message.channel.send(content=f"**[{message.author.display_name}]**: {parts['content']}", embeds=embeds)
             log(f"✅ 转发成功 (普通消息)")
             
     except discord.Forbidden:
@@ -246,6 +288,11 @@ async def on_message(message):
     await bot.process_commands(message)
 
 # ==================== Slash 命令 ====================
+
+@bot.tree.command(name='start_translate', description='开启本频道自动翻译 (默认替换模式)')
+async def start_translate(interaction: discord.Interaction):
+    channel_modes[interaction.channel.id] = 'replace'
+    await interaction.response.send_message('✅ 已开启自动翻译 (模式: 删除原句+Webhook替换)', ephemeral=True)
 
 @bot.tree.command(name='reply_mode', description='在此频道设置回复翻译模式')
 async def reply_mode(interaction: discord.Interaction):
@@ -264,15 +311,24 @@ async def off_mode(interaction: discord.Interaction):
 
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
+    """
+    右键菜单翻译：重建 Embed，保留原图和格式
+    """
     await interaction.response.defer(ephemeral=True)
     try:
         parts = await extract_and_translate_parts(message)
-        result_text = parts['content']
-        if parts['embeds']:
-            for em in parts['embeds']:
-                if em['description']:
-                    result_text += f"\n\n[Embed]: {em['description']}"
-        await interaction.followup.send(f"📝 翻译结果：\n{result_text}", ephemeral=True)
+        
+        # 重建 Embeds
+        embeds_to_send = rebuild_embeds(parts['embeds'])
+        content_to_send = parts['content']
+        
+        if not content_to_send and not embeds_to_send:
+            await interaction.followup.send("⚠️ 消息为空或无需翻译", ephemeral=True)
+            return
+
+        # 发送 (ephemeral=True 只有你看得见)
+        await interaction.followup.send(content=content_to_send, embeds=embeds_to_send, ephemeral=True)
+        
     except Exception as e:
         await interaction.followup.send(f"❌ 翻译失败: {e}", ephemeral=True)
 
