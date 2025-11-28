@@ -88,7 +88,10 @@ def clean_text(text):
     # 1. 去除 URL
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
     
-    # 2. 去除残缺的 Markdown 链接 []() 或 []
+    # 2. 【修复】去除残缺的 Markdown 链接 []() 或 [] 或 [](
+    # 针对你遇到的 [] ( 这种残留
+    text = text.replace('[](', '') 
+    text = re.sub(r'\[\s*\]\(\s*\)', '', text) # 去除 [ ]()
     text = re.sub(r'\[.*?\]\(\s*\)', '', text) # 去除 [text]()
     text = re.sub(r'\[\s*\]', '', text)       # 去除 []
     
@@ -102,7 +105,6 @@ def translate_text_sync(text):
     text = clean_text(text)
     
     if not text: return ""
-    # 如果清洗后太短，不翻译
     if len(text.split()) < 1 and not len(text) > 10: 
         return text
     if re.search(r'[\u4e00-\u9fff]', text):
@@ -168,13 +170,12 @@ async def process_message_content(message):
 
     for embed in message.embeds:
         should_rebuild_embed = False
-        # 只有 Rich (机器人发的消息) 或 Article 才作为 Embed 重建
-        # Image/Link/Video 类型的 Embed (通常是链接预览) 我们不重建框，而是提取里面的图
         if embed.type in ['rich', 'article']:
             should_rebuild_embed = True
         
+        has_text = bool(embed.title or embed.description or embed.fields or (embed.footer and embed.footer.text))
+        
         if should_rebuild_embed:
-            # 重建 Embed 逻辑
             embed_data = {
                 'title': await async_translate_text(embed.title) if embed.title else "",
                 'description': await async_translate_text(embed.description) if embed.description else "",
@@ -189,7 +190,6 @@ async def process_message_content(message):
                     'text': await async_translate_text(embed.footer.text) if embed.footer and embed.footer.text else None,
                     'icon_url': embed.footer.icon_url if embed.footer else None
                 },
-                # 确保这里提取了 Embed 原有的图片
                 'image': embed.image.url if embed.image else None,
                 'thumbnail': embed.thumbnail.url if embed.thumbnail else None,
                 'fields': []
@@ -202,7 +202,7 @@ async def process_message_content(message):
                 })
             parts['embeds'].append(embed_data)
         else:
-            # 如果是链接预览，提取图片用于后续重组
+            # 链接预览等非 Rich Embed，只提取图片
             if embed.image:
                 parts['image_urls'].append(embed.image.url)
             elif embed.thumbnail:
@@ -238,8 +238,8 @@ def apply_output_style(parts, style):
         return parts
 
     if style == 'embed':
-        # 强制卡片化：纯文本/图 -> Embed
-        # 仅当目前没有 Embed 时才创建新卡片 (避免嵌套)
+        # 强制卡片化
+        # 仅当没有 Embed 时创建，或者将现有内容合并
         if not parts['embeds'] and (parts['content'] or parts['image_urls']):
             new_embed = {
                 'title': "",
@@ -254,15 +254,13 @@ def apply_output_style(parts, style):
                 'fields': []
             }
             
-            # 【关键逻辑】如果存在图片（无论是上传的还是链接提取的）
-            # 强制将其设置为 Embed 的主图
+            # 【修复】将第一张图设为 Embed 主图，避免裸链接出现在文字中
             if parts['image_urls']:
                 new_embed['image'] = parts['image_urls'][0]
-                # 剩余图片保留在队列中，作为附图链接
                 parts['image_urls'] = parts['image_urls'][1:]
             
             parts['embeds'].append(new_embed)
-            parts['content'] = "" # 内容已移入 Embed
+            parts['content'] = "" 
         
         return parts
 
@@ -492,19 +490,31 @@ async def off_mode(interaction: discord.Interaction):
     save_config() 
     await interaction.response.send_message('🛑 全频道自动翻译已关闭', ephemeral=True)
 
+# ----------------- 右键菜单 (Context Menu) -----------------
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     await interaction.response.defer(ephemeral=True)
     try:
         parts = await process_message_content(message)
+        
+        # 【右键翻译逻辑更新】
+        # 强制使用 Embed 样式，确保“图片”被包含在 Embed 里，而不是裸露的 URL
+        # 同时清洗掉 []() 等残留
+        parts = apply_output_style(parts, 'embed')
+        
+        # 提取结果
         final_text = parts['content']
+        # 理论上 Embed 模式下 image_urls 会被移入 embed.image，这里检查是否还有剩余的
         if parts['image_urls']: 
             if final_text: final_text += "\n"
             final_text += "\n".join(parts['image_urls'])
+            
         embeds_obj = rebuild_embeds(parts['embeds'])
+        
         if not final_text and not embeds_obj:
             await interaction.followup.send("⚠️ 消息为空", ephemeral=True)
             return
+
         await interaction.followup.send(content=final_text, embeds=embeds_obj, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ 错误: {e}", ephemeral=True)
