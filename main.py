@@ -11,7 +11,13 @@ import functools
 # ==================== 配置区域 ====================
 TOKEN = os.getenv('DISCORD_TOKEN')
 MIN_WORDS = 5
-DEBUG = True  # 开启详细日志
+DEBUG = True
+
+# 核心修改：检测环境变量，决定配置文件存在哪
+# 如果在 Railway 上配置了 Volume 挂载到 /data，我们就存在那里
+# 否则（本地开发）存在当前目录
+DATA_DIR = os.getenv('DATA_DIR', '.') 
+CONFIG_FILE = os.path.join(DATA_DIR, 'bot_config.json')
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -31,9 +37,42 @@ else:
     print('⚠️ JSON Key 未设置')
     client = None
 
-# ==================== 状态存储 ====================
+# ==================== 状态存储与持久化 ====================
 channel_modes = {}
 webhook_cache = {}
+bot_mappings = {} 
+
+def load_config():
+    """从持久化文件加载配置"""
+    global bot_mappings
+    
+    # 确保目录存在（如果是 /data 这种挂载目录，通常已存在，但为了保险）
+    if DATA_DIR != '.' and not os.path.exists(DATA_DIR):
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            print(f"📂 创建数据目录: {DATA_DIR}")
+        except Exception as e:
+            print(f"❌ 无法创建数据目录: {e}")
+
+    if os.path.exists(CONFIG_FILE):
+        try:
+            with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
+                bot_mappings = json.load(f)
+            print(f"📂 已加载配置文件: {CONFIG_FILE} (包含 {len(bot_mappings)} 个频道设定)")
+        except Exception as e:
+            print(f"❌ 加载配置文件失败: {e}")
+            bot_mappings = {}
+    else:
+        print(f"📂 未找到配置文件 {CONFIG_FILE}，将在首次保存时创建")
+
+def save_config():
+    """保存配置到持久化文件"""
+    try:
+        with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
+            json.dump(bot_mappings, f, ensure_ascii=False, indent=4)
+        print(f"💾 配置已保存至 {CONFIG_FILE}")
+    except Exception as e:
+        print(f"❌ 保存配置文件失败: {e}")
 
 # ==================== 核心功能函数 ====================
 
@@ -42,17 +81,12 @@ def log(message):
         print(message)
 
 def translate_text_sync(text):
-    """同步翻译核心逻辑（含智能换行修正）"""
     if not text: return ""
-    # 如果只有链接或数字，不翻译
     if len(text.split()) < 1 and not len(text) > 10: 
         return text
-        
-    # 这里的正则检测中文，如果已包含中文则直接返回
     if re.search(r'[\u4e00-\u9fff]', text):
         return text
     
-    # 保护 @提及
     mention_placeholders = {}
     counter = 0
     for mention in ['@everyone', '@here']:
@@ -72,25 +106,18 @@ def translate_text_sync(text):
 
     try:
         if not client: return text
-        
         detection = client.detect_language(text)
         if detection['language'].startswith('zh'):
             return text
-            
         result = client.translate(
-            text, 
-            source_language='en', 
-            target_language='zh-CN', 
-            format_='text'
+            text, source_language='en', target_language='zh-CN', format_='text'
         )['translatedText']
         
-        # ========== 修复行距逻辑 ==========
         result = result.replace(' \n', '\n').replace('\n ', '\n')
         orig_double_newlines = text.count('\n\n')
         trans_double_newlines = result.count('\n\n')
         if trans_double_newlines > orig_double_newlines:
              result = re.sub(r'\n+', '\n', result)
-        # ================================
         
     except Exception as e:
         print(f'❌ 翻译异常: {e}')
@@ -107,25 +134,15 @@ async def async_translate_text(text):
     return await loop.run_in_executor(None, functools.partial(translate_text_sync, text))
 
 async def process_message_content(message):
-    """
-    智能处理消息结构
-    """
-    parts = {
-        'content': message.content or "", 
-        'embeds': [],     
-        'image_urls': []  
-    }
+    parts = {'content': message.content or "", 'embeds': [], 'image_urls': []}
 
-    # 1. 翻译正文
     if parts['content']:
         parts['content'] = await async_translate_text(parts['content'])
 
-    # 2. 处理附件
     if message.attachments:
         for attachment in message.attachments:
             parts['image_urls'].append(attachment.url)
 
-    # 3. 处理 Embeds
     for embed in message.embeds:
         should_rebuild_embed = False
         if embed.type in ['rich', 'article']:
@@ -162,19 +179,14 @@ async def process_message_content(message):
                     'inline': field.inline
                 })
             parts['embeds'].append(embed_data)
-        
     return parts
 
 def rebuild_embeds(embed_data_list):
-    """重建 Embed 对象列表"""
     embeds = []
     for ed in embed_data_list:
         embed = discord.Embed(
-            title=ed['title'], 
-            description=ed['description'], 
-            color=ed['color'],
-            url=ed['url'],
-            timestamp=ed['timestamp']
+            title=ed['title'], description=ed['description'], 
+            color=ed['color'], url=ed['url'], timestamp=ed['timestamp']
         )
         if ed['author']['name']:
             embed.set_author(name=ed['author']['name'], icon_url=ed['author']['icon_url'])
@@ -200,180 +212,160 @@ async def get_webhook(channel):
                 return wh
         new_wh = await channel.create_webhook(name="Translation Hook")
         webhook_cache[channel.id] = new_wh
-        print(f"🆕 为频道 {channel.name} 创建了新 Webhook")
         return new_wh
     except Exception as e:
         print(f"❌ Webhook 获取失败: {e}")
         return None
 
-async def send_translated_content(webhook, parts, author, mode):
-    send_kwargs = {
-        'username': author.display_name,
-        'avatar_url': author.avatar.url if author.avatar else None,
-        'wait': True
-    }
-    
+async def send_translated_content(webhook, parts, display_name, avatar_url):
+    send_kwargs = {'username': display_name, 'avatar_url': avatar_url, 'wait': True}
     final_content = parts['content']
     if parts['image_urls']:
-        if final_content:
-            final_content += "\n"
+        if final_content: final_content += "\n"
         final_content += "\n".join(parts['image_urls'])
-
     embeds_obj = rebuild_embeds(parts['embeds'])
-
     if final_content or embeds_obj:
         try:
             await webhook.send(content=final_content, embeds=embeds_obj, **send_kwargs)
         except Exception as e:
-            print(f"❌ 发送具体内容失败: {e}")
+            print(f"❌ 发送失败: {e}")
 
 # ==================== 事件处理 ====================
 
 @bot.event
 async def on_ready():
-    print(f'🚀 {bot.user} 已上线！等待消息中...')
+    print(f'🚀 {bot.user} 已上线！')
+    load_config() 
     try:
-        synced = await bot.tree.sync()
-        print(f'✅ 同步了 {len(synced)} 个命令')
+        await bot.tree.sync()
+        print(f'✅ 命令已同步')
     except Exception as e:
-        print(f'❌ 同步命令失败: {e}')
+        print(f'❌ 命令同步失败: {e}')
 
 @bot.event
 async def on_message(message):
-    if message.author == bot.user:
-        return
+    if message.author == bot.user: return
+    if not isinstance(message.channel, discord.TextChannel): return
 
-    # 防死循环第二道防线：如果消息来自 webhook，且频道模式不是 off，
-    # 且消息内容本身就是中文，下面的逻辑会检测到内容无变化从而停止。
+    cid = str(message.channel.id)
+    uid = str(message.author.id)
     
-    channel_id = message.channel.id
-    current_mode = channel_modes.get(channel_id, 'off') 
+    target_config = bot_mappings.get(cid, {}).get(uid)
+    channel_mode = channel_modes.get(message.channel.id, 'off')
 
-    if current_mode == 'off':
+    if not target_config and channel_mode == 'off':
         await bot.process_commands(message)
-        return
-
-    if not isinstance(message.channel, discord.TextChannel):
         return
 
     try:
         parts = await process_message_content(message)
     except Exception as e:
-        print(f"❌ 处理失败: {e}")
+        print(f"❌ 提取错误: {e}")
         return
     
-    # ========== 核心修复：死循环防御逻辑 ==========
     should_send = False
-    
-    # 1. 检查文字是否发生了变化 (去空格对比)
-    original_text = (message.content or "").strip()
-    translated_text = (parts['content'] or "").strip()
-    if original_text != translated_text:
+    if target_config:
         should_send = True
-        
-    # 2. 检查 Embed 是否发生了变化
-    if not should_send and message.embeds and parts['embeds']:
-        # 简单比对第一个 Embed 的标题或描述
-        orig_embed = message.embeds[0]
-        trans_embed = parts['embeds'][0]
-        
-        orig_title = (orig_embed.title or "").strip()
-        trans_title = (trans_embed['title'] or "").strip()
-        
-        orig_desc = (orig_embed.description or "").strip()
-        trans_desc = (trans_embed['description'] or "").strip()
-        
-        if (orig_title != trans_title) or (orig_desc != trans_desc):
+    else:
+        original_text = (message.content or "").strip()
+        translated_text = (parts['content'] or "").strip()
+        if original_text != translated_text:
             should_send = True
-            
-    # 3. 检查是否有附件需要搬运 (仅在 Replace 模式下)
-    # 如果原消息有附件，且模式是 Replace，因为我们会删除原消息，所以必须发送新消息(哪怕文字没变)
-    # 但是！如果原消息已经是中文（文字没变），我们通常不想删它。
-    # 这里做一个权衡：如果文字没变，且是 replace 模式，且有附件 -> 不删，不发（避免重复）
-    # 只有当文字变了，才进行替换。
-    # 修正：如果文字没变，但我们处于 replace 模式，我们应该什么都不做（保留原样），不要删除原消息。
-    
-    # 总结判断：只有当【内容确实被翻译了】才发送。
+        
+        if not should_send and message.embeds and parts['embeds']:
+            orig_embed = message.embeds[0]
+            trans_embed = parts['embeds'][0]
+            if ((orig_embed.title or "") != (trans_embed['title'] or "")) or \
+               ((orig_embed.description or "") != (trans_embed['description'] or "")):
+                should_send = True
+
     if not should_send:
-        # 如果内容没变，直接跳过，不要删除原消息，也不要发新消息
-        # 这样就能完美解决中文消息无限重复的问题
-        # log(f"⏭️ 内容未变 (可能是中文)，跳过")
         await bot.process_commands(message)
         return
 
-    # ==========================================
-
-    log(f"⚡ 检测到内容变化，执行翻译转发...")
+    log(f"⚡ 处理消息: [{message.author.display_name}]")
     webhook = await get_webhook(message.channel)
     
-    try:
-        if webhook:
-            if current_mode == 'replace':
-                try: await message.delete()
-                except: pass 
-            
-            await send_translated_content(webhook, parts, message.author, current_mode)
+    if webhook:
+        if target_config:
+            send_name = target_config['name']
+            send_avatar = target_config['avatar']
+            try: await message.delete()
+            except: pass
         else:
-            if current_mode == 'replace':
+            send_name = message.author.display_name
+            send_avatar = message.author.avatar.url if message.author.avatar else None
+            if channel_mode == 'replace':
                 try: await message.delete()
                 except: pass
+
+        await send_translated_content(webhook, parts, send_name, send_avatar)
+    else:
+        # 无 Webhook 降级
+        if target_config or channel_mode == 'replace':
+            try: await message.delete()
+            except: pass
             
-            final_text = f"**[{message.author.display_name}]**: {parts['content']}"
-            if parts['image_urls']:
-                final_text += "\n" + "\n".join(parts['image_urls'])
-            
-            embeds_obj = rebuild_embeds(parts['embeds'])
-            await message.channel.send(content=final_text, embeds=embeds_obj)
-            
-    except discord.Forbidden:
-        print(f"❌ 权限不足")
-    except Exception as e:
-        print(f"❌ 发送异常: {e}")
+        name_prefix = target_config['name'] if target_config else message.author.display_name
+        final_text = f"**[{name_prefix}]**: {parts['content']}"
+        if parts['image_urls']: final_text += "\n" + "\n".join(parts['image_urls'])
+        embeds_obj = rebuild_embeds(parts['embeds'])
+        await message.channel.send(content=final_text, embeds=embeds_obj)
 
     await bot.process_commands(message)
 
 # ==================== Slash 命令 ====================
 
-@bot.tree.command(name='start_translate', description='开启本频道自动翻译 (默认替换模式)')
+@bot.tree.command(name='setup_bot_translator', description='设定：自动翻译指定机器人，并使用自定义头像和名字发布')
+async def setup_bot_translator(interaction: discord.Interaction, target: discord.User, name: str, avatar: discord.Attachment):
+    cid = str(interaction.channel.id)
+    uid = str(target.id)
+    
+    if cid not in bot_mappings:
+        bot_mappings[cid] = {}
+        
+    bot_mappings[cid][uid] = {
+        'name': name,
+        'avatar': avatar.url 
+    }
+    save_config()
+    await interaction.response.send_message(f"✅ 设定成功！(已保存到持久化存储)\n🎯 监听: {target.mention}\n🎭 新名: {name}", ephemeral=True)
+
+@bot.tree.command(name='clear_bot_translator', description='清除当前频道对指定机器人的翻译设定')
+async def clear_bot_translator(interaction: discord.Interaction, target: discord.User):
+    cid = str(interaction.channel.id)
+    uid = str(target.id)
+    if cid in bot_mappings and uid in bot_mappings[cid]:
+        del bot_mappings[cid][uid]
+        save_config()
+        await interaction.response.send_message(f"🗑️ 已移除对 {target.mention} 的特殊设定。", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"⚠️ 未找到设定。", ephemeral=True)
+
+@bot.tree.command(name='start_translate', description='开启本频道全员自动翻译 (不换皮)')
 async def start_translate(interaction: discord.Interaction):
     channel_modes[interaction.channel.id] = 'replace'
-    await interaction.response.send_message('✅ 已开启自动翻译 (模式: 删除原句+Webhook替换)', ephemeral=True)
-
-@bot.tree.command(name='reply_mode', description='在此频道设置回复翻译模式')
-async def reply_mode(interaction: discord.Interaction):
-    channel_modes[interaction.channel.id] = 'reply'
-    await interaction.response.send_message('✅ 已设为回复模式', ephemeral=True)
-
-@bot.tree.command(name='replace_mode', description='在此频道设置删除+代替模式')
-async def replace_mode(interaction: discord.Interaction):
-    channel_modes[interaction.channel.id] = 'replace'
-    await interaction.response.send_message('✅ 已设为替换模式', ephemeral=True)
+    await interaction.response.send_message('✅ 已开启全频道自动翻译', ephemeral=True)
 
 @bot.tree.command(name='off_mode', description='关闭本频道自动翻译')
 async def off_mode(interaction: discord.Interaction):
     channel_modes[interaction.channel.id] = 'off'
-    await interaction.response.send_message('🛑 本频道自动翻译已关闭', ephemeral=True)
+    await interaction.response.send_message('🛑 全频道自动翻译已关闭', ephemeral=True)
 
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     await interaction.response.defer(ephemeral=True)
     try:
         parts = await process_message_content(message)
-        
         final_text = parts['content']
-        if parts['image_urls']:
-            final_text += "\n" + "\n".join(parts['image_urls'])
-        
+        if parts['image_urls']: final_text += "\n" + "\n".join(parts['image_urls'])
         embeds_obj = rebuild_embeds(parts['embeds'])
-        
         if not final_text and not embeds_obj:
-            await interaction.followup.send("⚠️ 消息为空或无需翻译", ephemeral=True)
+            await interaction.followup.send("⚠️ 消息为空", ephemeral=True)
             return
-
         await interaction.followup.send(content=final_text, embeds=embeds_obj, ephemeral=True)
-        
     except Exception as e:
-        await interaction.followup.send(f"❌ 翻译失败: {e}", ephemeral=True)
+        await interaction.followup.send(f"❌ 错误: {e}", ephemeral=True)
 
 # ==================== 启动 ====================
 
