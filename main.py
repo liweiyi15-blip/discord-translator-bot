@@ -38,7 +38,6 @@ else:
 # ==================== 状态存储与持久化 ====================
 webhook_cache = {}
 
-# 全局配置结构
 global_config = {
     "channel_modes": {},      
     "bot_mappings": {},       
@@ -185,6 +184,7 @@ async def process_message_content(message):
     return parts
 
 def apply_output_style(parts, style):
+    """根据设定的 Style 强制转换格式"""
     if style == 'auto':
         return parts 
 
@@ -300,8 +300,9 @@ async def on_ready():
     print(f'🚀 {bot.user} 已上线！')
     load_config() 
     try:
-        await bot.tree.sync()
-        print(f'✅ 命令已同步')
+        # 同步命令树 (包括 Slash 命令和右键菜单)
+        synced = await bot.tree.sync()
+        print(f'✅ 命令已同步 ({len(synced)} 个命令)')
     except Exception as e:
         print(f'❌ 命令同步失败: {e}')
 
@@ -312,9 +313,8 @@ async def on_message(message):
 
     cid = str(message.channel.id)
     uid = str(message.author.id)
-    name = message.author.display_name # 获取发信人的显示名称 (例如: TrendSpider)
+    name = message.author.display_name 
     
-    # 核心修改：同时尝试用 ID 和 Name 去匹配配置
     channel_mappings = global_config["bot_mappings"].get(cid, {})
     target_config = channel_mappings.get(uid) or channel_mappings.get(name)
     
@@ -326,14 +326,15 @@ async def on_message(message):
         return
 
     try:
+        # 1. 提取翻译
         parts = await process_message_content(message)
+        # 2. 应用样式 (仅自动模式应用，右键菜单不应用)
         parts = apply_output_style(parts, output_style)
     except Exception as e:
         print(f"❌ 处理错误: {e}")
         return
     
     should_send = False
-    
     if target_config:
         should_send = True
     else:
@@ -344,12 +345,9 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    # Log 中显示匹配到的类型 (ID 或 Name)
-    match_type = f"ID: {uid}" if channel_mappings.get(uid) else f"Name: {name}"
-    log(f"⚡ 转发消息: [{message.author.display_name}] (Matched by {match_type})")
+    log(f"⚡ 转发消息: [{message.author.display_name}]")
     
     webhook = await get_webhook(message.channel)
-    
     if webhook:
         if target_config:
             send_name = target_config['name']
@@ -377,7 +375,7 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ==================== Slash 命令 ====================
+# ==================== Slash 命令 & Context Menu ====================
 
 @bot.tree.command(name='set_style', description='设置本频道翻译结果的输出格式')
 @discord.app_commands.choices(style=[
@@ -393,17 +391,11 @@ async def set_style(interaction: discord.Interaction, style: discord.app_command
 
 @bot.tree.command(name='setup_bot_translator', description='设定：输入ID 或 名字 来指定机器人，并使用自定义头像和名字发布')
 async def setup_bot_translator(interaction: discord.Interaction, target: str, name: str, avatar: discord.Attachment):
-    """
-    target: 目标ID (数字) 或 目标名字 (字符串，如 "TrendSpider")
-    """
     cid = str(interaction.channel.id)
-    target_key = target.strip() # 去除空格
-    
-    # 移除了 isdigit 检查，允许任意字符串作为 Key
+    target_key = target.strip()
     
     if cid not in global_config["bot_mappings"]:
         global_config["bot_mappings"][cid] = {}
-        
     global_config["bot_mappings"][cid][target_key] = {'name': name, 'avatar': avatar.url}
     save_config()
     await interaction.response.send_message(f"✅ 设定成功！监听目标: `{target_key}`", ephemeral=True)
@@ -435,6 +427,33 @@ async def off_mode(interaction: discord.Interaction):
     save_config() 
     await interaction.response.send_message('🛑 全频道自动翻译已关闭', ephemeral=True)
 
+# ----------------- 右键菜单 (Context Menu) -----------------
+# 确保这个名字在 Context Menu 中显示为 "翻译此消息"
+# 行为逻辑: 强制 Auto (镜像)，不读取 set_style 的设置
+@bot.tree.context_menu(name='翻译此消息')
+async def translate_message(interaction: discord.Interaction, message: discord.Message):
+    await interaction.response.defer(ephemeral=True)
+    try:
+        # 1. 提取翻译 (process_message_content 默认就是 Auto 模式)
+        parts = await process_message_content(message)
+        
+        # 2. 不调用 apply_output_style，直接输出，实现“所见即所得”
+        
+        final_text = parts['content']
+        if parts['image_urls']: 
+            if final_text: final_text += "\n"
+            final_text += "\n".join(parts['image_urls'])
+            
+        embeds_obj = rebuild_embeds(parts['embeds'])
+        
+        if not final_text and not embeds_obj:
+            await interaction.followup.send("⚠️ 消息为空", ephemeral=True)
+            return
+
+        await interaction.followup.send(content=final_text, embeds=embeds_obj, ephemeral=True)
+    except Exception as e:
+        await interaction.followup.send(f"❌ 错误: {e}", ephemeral=True)
+
 # ==================== 启动 ====================
 
 async def main():
@@ -445,4 +464,3 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
-    
