@@ -99,43 +99,59 @@ async def async_translate_text(text):
 
 async def extract_and_translate_parts(message):
     """
-    提取并翻译消息内容，同时保留 Embed 的结构和图片信息
+    提取并翻译消息内容
+    修改：增加 attachment_urls 字段，用于处理纯图片附件，避免强制转为 Embed
     """
-    parts = {'content': message.content or "", 'embeds': []}
+    parts = {
+        'content': message.content or "", 
+        'embeds': [], 
+        'attachment_urls': [] # 新增：附件链接
+    }
+
+    # 1. 翻译正文
     if parts['content']:
         parts['content'] = await async_translate_text(parts['content'])
     
+    # 2. 提取附件 (保留原图格式的关键)
+    if message.attachments:
+        for attachment in message.attachments:
+            parts['attachment_urls'].append(attachment.url)
+
+    # 3. 处理 Embeds (如果原消息本身就是 Embed)
     for embed in message.embeds:
-        embed_data = {
-            'title': await async_translate_text(embed.title) if embed.title else "",
-            'description': await async_translate_text(embed.description) if embed.description else "",
-            'color': embed.color.value if embed.color else None,
-            'url': embed.url, # 保留标题链接
-            'timestamp': embed.timestamp, # 保留时间戳
-            'author': {
-                'name': embed.author.name if embed.author else None,
-                'icon_url': embed.author.icon_url if embed.author else None
-            },
-            'footer': {
-                'text': await async_translate_text(embed.footer.text) if embed.footer and embed.footer.text else None,
-                'icon_url': embed.footer.icon_url if embed.footer else None
-            },
-            'image': embed.image.url if embed.image else None,
-            'thumbnail': embed.thumbnail.url if embed.thumbnail else None,
-            'fields': []
-        }
-        for field in embed.fields:
-            embed_data['fields'].append({
-                'name': await async_translate_text(field.name) if field.name else "",
-                'value': await async_translate_text(field.value) if field.value else "",
-                'inline': field.inline
-            })
-        parts['embeds'].append(embed_data)
+        # 有些简单的 Link Preview 也是 Embed，如果不需要处理可以加判断，但这里保留以兼容复杂消息
+        if embed.type == 'rich' or embed.type == 'article' or embed.type == 'image': 
+            embed_data = {
+                'title': await async_translate_text(embed.title) if embed.title else "",
+                'description': await async_translate_text(embed.description) if embed.description else "",
+                'color': embed.color.value if embed.color else None,
+                'url': embed.url,
+                'timestamp': embed.timestamp,
+                'author': {
+                    'name': embed.author.name if embed.author else None,
+                    'icon_url': embed.author.icon_url if embed.author else None
+                },
+                'footer': {
+                    'text': await async_translate_text(embed.footer.text) if embed.footer and embed.footer.text else None,
+                    'icon_url': embed.footer.icon_url if embed.footer else None
+                },
+                'image': embed.image.url if embed.image else None,
+                'thumbnail': embed.thumbnail.url if embed.thumbnail else None,
+                'fields': []
+            }
+            for field in embed.fields:
+                embed_data['fields'].append({
+                    'name': await async_translate_text(field.name) if field.name else "",
+                    'value': await async_translate_text(field.value) if field.value else "",
+                    'inline': field.inline
+                })
+            parts['embeds'].append(embed_data)
+            
     return parts
 
 def rebuild_embeds(embed_data_list):
     """
-    根据翻译后的数据重建 Discord Embed 对象列表
+    重建 Embed 对象
     """
     embeds = []
     for ed in embed_data_list:
@@ -188,12 +204,24 @@ async def send_translated_content(webhook, parts, author, mode, original_message
         'wait': True
     }
     
-    content = parts['content']
+    final_content = parts['content']
+    
+    # 核心逻辑修改：如果原消息有附件，直接把链接拼接到正文后面
+    # Discord 会自动把这个链接渲染成一张大图，且没有 Embed 的边框
+    if parts['attachment_urls']:
+        # 加换行符确保图片在文字下方
+        if final_content:
+            final_content += "\n" 
+        final_content += "\n".join(parts['attachment_urls'])
+
     embeds = rebuild_embeds(parts['embeds'])
 
-    if content or embeds:
+    # 只有当有内容或有 Embed 时才发送
+    if final_content or embeds:
         try:
-            await webhook.send(content=content, embeds=embeds, **send_kwargs)
+            # 这里的 content 包含了文字 + 图片链接
+            # embeds 包含了原有的 Rich Embed (如果有的话)
+            await webhook.send(content=final_content, embeds=embeds, **send_kwargs)
         except Exception as e:
             print(f"❌ 发送具体内容失败: {e}")
 
@@ -216,12 +244,7 @@ async def on_message(message):
 
     # 2. 检查模式
     channel_id = message.channel.id
-    mode = channel_modes.get(channel_id, 'replace') # 默认为 replace，但在逻辑里如果没有 explicitly set 且不是 command 可能会需要调整
-    
-    # 这里的逻辑是：如果没有开启过，默认为 off (你可以改为默认开启)
-    # 现有的代码逻辑：如果 key 不存在，返回 'replace'。如果你希望默认不翻译，请把 dict.get 的默认值改为 'off'
-    # 为了符合“开启命令”的逻辑，这里建议默认 'off'，只有使用了 /start_translate 或者是之前的命令才开启
-    current_mode = channel_modes.get(channel_id, 'off') 
+    current_mode = channel_modes.get(channel_id, 'off') # 默认关闭，需手动开启
 
     if current_mode == 'off':
         await bot.process_commands(message)
@@ -240,19 +263,31 @@ async def on_message(message):
         print(f"❌ 提取失败: {e}")
         return
     
-    # 3. 变动检测 (防死循环)
+    # 3. 变动检测 
+    # 如果内容变了，或者原消息有 Embed 且被修改了，则视为需要发送
     content_changed = parts['content'] != (message.content or "")
-    embed_changed = False
-    if parts['embeds']:
+    
+    # 如果原消息只是纯图片（无文字），翻译后文字依然为空，但我们需要转发图片
+    # 所以只要是 replace 模式，即使文字没变（空的），我们也得转发过去，否则原图会被删掉只剩个寂寞
+    # 但为了防止文字没变时的死循环（如果是 Reply 模式），我们需要小心
+    
+    should_send = False
+    if content_changed:
+        should_send = True
+    elif parts['embeds']:
+        # 简单检查 Embed 是否变化
         orig_embed = message.embeds[0]
         trans_embed = parts['embeds'][0]
-        # 简单比对 Title 和 Description
         if (trans_embed['title'] != (orig_embed.title or "")) or \
            (trans_embed['description'] != (orig_embed.description or "")):
-            embed_changed = True
+            should_send = True
+    elif parts['attachment_urls']:
+        # 如果有附件，且是 Replace 模式，必须转发，因为原消息会被删
+        if current_mode == 'replace':
+            should_send = True
 
-    if not content_changed and not embed_changed:
-        log(f"⏭️ 内容未变或已是中文，跳过")
+    if not should_send:
+        log(f"⏭️ 内容未变或无需翻译，跳过")
         await bot.process_commands(message)
         return
 
@@ -270,14 +305,18 @@ async def on_message(message):
             await send_translated_content(webhook, parts, message.author, current_mode, message)
             log(f"✅ 转发成功 (Webhook)")
         else:
-            # 降级处理
+            # 降级处理 (没有 Webhook)
             if current_mode == 'replace':
                 try: await message.delete()
                 except: pass
             
-            # 普通发送无法伪造头像，只能发送文字
+            # 普通发送
             embeds = rebuild_embeds(parts['embeds'])
-            await message.channel.send(content=f"**[{message.author.display_name}]**: {parts['content']}", embeds=embeds)
+            final_text = f"**[{message.author.display_name}]**: {parts['content']}"
+            if parts['attachment_urls']:
+                final_text += "\n" + "\n".join(parts['attachment_urls'])
+
+            await message.channel.send(content=final_text, embeds=embeds)
             log(f"✅ 转发成功 (普通消息)")
             
     except discord.Forbidden:
@@ -312,21 +351,25 @@ async def off_mode(interaction: discord.Interaction):
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     """
-    右键菜单翻译：重建 Embed，保留原图和格式
+    右键菜单翻译
     """
     await interaction.response.defer(ephemeral=True)
     try:
         parts = await extract_and_translate_parts(message)
         
-        # 重建 Embeds
         embeds_to_send = rebuild_embeds(parts['embeds'])
         content_to_send = parts['content']
+
+        # 处理图片链接
+        if parts['attachment_urls']:
+            if content_to_send:
+                content_to_send += "\n"
+            content_to_send += "\n".join(parts['attachment_urls'])
         
         if not content_to_send and not embeds_to_send:
             await interaction.followup.send("⚠️ 消息为空或无需翻译", ephemeral=True)
             return
 
-        # 发送 (ephemeral=True 只有你看得见)
         await interaction.followup.send(content=content_to_send, embeds=embeds_to_send, ephemeral=True)
         
     except Exception as e:
