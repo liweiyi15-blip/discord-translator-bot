@@ -85,18 +85,18 @@ def clean_text(text):
     """
     if not text: return ""
     
-    # 1. 【优先】去除 Markdown 格式的链接 [text](url) (保留 text)
-    # 这部分是针对含有文字的链接，保留链接文字
+    # 1. 去除 Markdown 格式的链接 (保留链接文字)
     text = re.sub(r'\[([^\]]*)\]\(https?://\S+\)', r'\1', text) 
 
-    # 2. 去除所有裸 URL (包括剩下的)
+    # 2. 去除所有裸 URL 
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
     
-    # 3. 强力清理残留的括号和方括号组合 (针对 [] ( 这种残渣)
+    # 3. 强力清理残留的括号和方括号组合 
     text = text.replace('[](', '')
     text = text.replace('[]', '')
-    text = re.sub(r'\[\s*\]\(\s*\)', '', text) # 去除 [ ]()
-    text = re.sub(r'\[\s*\]', '', text)       # 去除 []
+    text = re.sub(r'\[\s*\]\(\s*\)', '', text) 
+    text = re.sub(r'\[.*?\]\(\s*\)', '', text)
+    text = re.sub(r'\[\s*\]', '', text) 
     
     # 4. 去除特定 Emoji
     text = text.replace('📷', '')
@@ -164,6 +164,9 @@ async def process_message_content(message):
     """提取和翻译消息"""
     parts = {'content': message.content or "", 'embeds': [], 'image_urls': []}
 
+    # 记录原始内容用于比对
+    original_content = message.content or ""
+    
     if parts['content']:
         parts['content'] = await async_translate_text(parts['content'])
 
@@ -179,7 +182,6 @@ async def process_message_content(message):
         has_text = bool(embed.title or embed.description or embed.fields or (embed.footer and embed.footer.text))
         
         if should_rebuild_embed:
-            # 重建 Rich Embed 逻辑
             embed_data = {
                 'title': await async_translate_text(embed.title) if embed.title else "",
                 'description': await async_translate_text(embed.description) if embed.description else "",
@@ -206,13 +208,13 @@ async def process_message_content(message):
                 })
             parts['embeds'].append(embed_data)
         else:
-            # 如果是 Link Preview，只提取图片
             if embed.image:
                 parts['image_urls'].append(embed.image.url)
             elif embed.thumbnail:
                 parts['image_urls'].append(embed.thumbnail.url)
-
-    return parts
+    
+    # 返回原始内容和翻译后内容，用于在 on_message 中判断是否发生实质变化
+    return parts, original_content
 
 def apply_output_style(parts, style):
     if style == 'auto':
@@ -241,7 +243,6 @@ def apply_output_style(parts, style):
         return parts
 
     if style == 'embed':
-        # 强制卡片化
         if not parts['embeds'] and (parts['content'] or parts['image_urls']):
             new_embed = {
                 'title': "",
@@ -256,7 +257,6 @@ def apply_output_style(parts, style):
                 'fields': []
             }
             
-            # 将第一张图设为 Embed 主图
             if parts['image_urls']:
                 new_embed['image'] = parts['image_urls'][0]
                 parts['image_urls'] = parts['image_urls'][1:]
@@ -337,6 +337,11 @@ async def on_message(message):
     if message.author == bot.user: return
     if not isinstance(message.channel, discord.TextChannel): return
 
+    # 🛑 关键修复：忽略斜杠命令
+    if message.content and message.content.startswith('/'):
+        await bot.process_commands(message)
+        return
+
     # 🛑 死循环防御
     if message.webhook_id:
         current_wh = await get_webhook(message.channel)
@@ -357,25 +362,44 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
+    # 1. 提取和翻译 (返回原始内容，用于比对)
     try:
-        parts = await process_message_content(message)
-        parts = apply_output_style(parts, output_style)
+        parts, original_raw_content = await process_message_content(message)
     except Exception as e:
         print(f"❌ 处理错误: {e}")
         return
     
     should_send = False
     
+    # 判断是否发送的逻辑：
+    
+    # 1A. 如果是定向换皮目标，必须发送（应用样式）
     if target_config:
         should_send = True
+        parts = apply_output_style(parts, output_style) # 应用样式
+    
+    # 1B. 如果是全局翻译模式，检查内容是否真正发生了变化
     else:
-        if parts['content'] or parts['embeds'] or parts['image_urls']:
-             raw_clean = clean_text(message.content or "")
-             trans_clean = (parts['content'] or "").strip()
-             if not message.embeds and not message.attachments and raw_clean == trans_clean:
-                 should_send = False
-             else:
+        # 原始文本 (已清洗)
+        original_clean_text = clean_text(original_raw_content).strip()
+        # 翻译后文本 (已清洗)
+        translated_clean_text = (parts['content'] or "").strip()
+        
+        # 检查 Embeds/Attachments 是否发生了变化，或者内容是否发生了变化
+        # 如果是 Embed/Attachment，默认 assume 发生了变化 (因为我们不存储原 embed/attachment 状态)
+        if message.embeds or message.attachments:
+             # 如果 Embed/Attachment 存在，且文本发生了变化，或存在 Attachments (需要搬运)，则发送
+             if original_clean_text != translated_clean_text or message.attachments:
                  should_send = True
+        
+        # 纯文本情况下
+        elif original_clean_text != translated_clean_text:
+             should_send = True
+             
+        if should_send:
+            # 只有在确定发送时，才应用样式
+            parts = apply_output_style(parts, output_style)
+
 
     if not should_send:
         await bot.process_commands(message)
@@ -495,7 +519,7 @@ async def off_mode(interaction: discord.Interaction):
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     await interaction.response.defer(ephemeral=True)
     try:
-        parts = await process_message_content(message)
+        parts, _ = await process_message_content(message) # _ 忽略原始内容
         
         # 右键翻译：强制 Embed 样式，确保图片和文本被打包，避免裸露 URL
         parts = apply_output_style(parts, 'embed')
