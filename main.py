@@ -79,7 +79,27 @@ def log(message):
     if DEBUG:
         print(message)
 
+def clean_text(text):
+    """
+    清洗文本：去除链接、特定emoji
+    """
+    if not text: return ""
+    
+    # 1. 去除 URL (http/https/www)
+    text = re.sub(r'https?://\S+|www\.\S+', '', text)
+    
+    # 2. 去除特定 Emoji (📷)
+    text = text.replace('📷', '')
+    
+    # 3. (可选) 去除 Discord 自定义 Emoji 格式 <:name:id>，如果你希望也去掉的话
+    # text = re.sub(r'<a?:.+?:\d+>', '', text)
+    
+    return text.strip()
+
 def translate_text_sync(text):
+    # 先清洗，再翻译
+    text = clean_text(text)
+    
     if not text: return ""
     if len(text.split()) < 1 and not len(text) > 10: 
         return text
@@ -112,6 +132,7 @@ def translate_text_sync(text):
             text, source_language='en', target_language='zh-CN', format_='text'
         )['translatedText']
         
+        # 行距修复
         result = result.replace(' \n', '\n').replace('\n ', '\n')
         orig_double_newlines = text.count('\n\n')
         trans_double_newlines = result.count('\n\n')
@@ -133,24 +154,36 @@ async def async_translate_text(text):
     return await loop.run_in_executor(None, functools.partial(translate_text_sync, text))
 
 async def process_message_content(message):
+    """提取和翻译消息"""
     parts = {'content': message.content or "", 'embeds': [], 'image_urls': []}
 
+    # 翻译内容 (内部已包含清洗)
     if parts['content']:
         parts['content'] = await async_translate_text(parts['content'])
 
+    # 提取附件图片
     if message.attachments:
         for attachment in message.attachments:
             parts['image_urls'].append(attachment.url)
 
+    # 提取 Embeds
     for embed in message.embeds:
         should_rebuild_embed = False
         if embed.type in ['rich', 'article']:
             should_rebuild_embed = True
         
         has_text = bool(embed.title or embed.description or embed.fields or (embed.footer and embed.footer.text))
-        if not has_text and embed.image:
-            parts['image_urls'].append(embed.image.url)
-            should_rebuild_embed = False
+        
+        # 提取 Embed 里的图片
+        if embed.image:
+             # 如果 Embed 只有图没字，它本质就是张图，降级为 image_urls
+            if not has_text:
+                parts['image_urls'].append(embed.image.url)
+                should_rebuild_embed = False
+            else:
+                # 如果有字又有图，保留这个图的引用，后续可能用于 Flat 模式或 Embed 模式的主图
+                # 注意：这里我们不直接加到 image_urls，除非我们要把 Embed 拆了
+                pass 
 
         if should_rebuild_embed:
             embed_data = {
@@ -185,35 +218,33 @@ def apply_output_style(parts, style):
         return parts 
 
     if style == 'flat':
+        # 强制扁平化：Embed -> 纯文本
         new_content_blocks = []
         if parts['content']:
             new_content_blocks.append(parts['content'])
         
         for em in parts['embeds']:
-            if em['author']['name']:
-                new_content_blocks.append(f"**{em['author']['name']}**")
-            if em['title']:
-                new_content_blocks.append(f"**{em['title']}**")
-            if em['description']:
-                new_content_blocks.append(em['description'])
+            if em['author']['name']: new_content_blocks.append(f"**{em['author']['name']}**")
+            if em['title']: new_content_blocks.append(f"**{em['title']}**")
+            if em['description']: new_content_blocks.append(em['description'])
             
             for field in em['fields']:
                 new_content_blocks.append(f"**{field['name']}**: {field['value']}")
             
-            if em['footer']['text']:
-                new_content_blocks.append(f"_{em['footer']['text']}_")
+            if em['footer']['text']: new_content_blocks.append(f"_{em['footer']['text']}_")
             
-            if em['image']:
-                parts['image_urls'].append(em['image'])
-            if em['thumbnail']:
-                parts['image_urls'].append(em['thumbnail'])
+            # 提取图片链接
+            if em['image']: parts['image_urls'].append(em['image'])
+            if em['thumbnail']: parts['image_urls'].append(em['thumbnail'])
 
         parts['embeds'] = [] 
         parts['content'] = "\n\n".join(new_content_blocks).strip() 
         return parts
 
     if style == 'embed':
-        if not parts['embeds'] and parts['content']:
+        # 强制卡片化：纯文本/图 -> Embed
+        # 只有当没有现有 Embed 时才创建新的（避免嵌套）
+        if not parts['embeds'] and (parts['content'] or parts['image_urls']):
             new_embed = {
                 'title': "",
                 'description': parts['content'],
@@ -226,12 +257,16 @@ def apply_output_style(parts, style):
                 'thumbnail': None,
                 'fields': []
             }
+            
+            # 【修复图片显示】
+            # 如果有附件图片/提取图片，把第一张作为 Embed 的主图显示
             if parts['image_urls']:
                 new_embed['image'] = parts['image_urls'][0]
+                # 剩下的图片依然作为链接保留，否则就丢了
                 parts['image_urls'] = parts['image_urls'][1:]
             
             parts['embeds'].append(new_embed)
-            parts['content'] = "" 
+            parts['content'] = "" # 清空正文，因为已移入 Embed
         
         return parts
 
@@ -248,8 +283,11 @@ def rebuild_embeds(embed_data_list):
             embed.set_author(name=ed['author']['name'], icon_url=ed['author']['icon_url'])
         if ed['footer']['text']:
             embed.set_footer(text=ed['footer']['text'], icon_url=ed['footer']['icon_url'])
+        
+        # 关键：正确设置 Embed 图片
         if ed['image']:
             embed.set_image(url=ed['image'])
+            
         if ed['thumbnail']:
             embed.set_thumbnail(url=ed['thumbnail'])
         for f in ed['fields']:
@@ -263,12 +301,9 @@ async def get_webhook(channel):
     try:
         webhooks = await channel.webhooks()
         for wh in webhooks:
-            # 简单判断：如果我们能拿到 token，说明这个 webhook 是我们可以控制的
-            # 通常机器人创建的 webhook 才有 token (对机器人可见)
             if wh.token: 
                 webhook_cache[channel.id] = wh
                 return wh
-        
         new_wh = await channel.create_webhook(name="Translation Hook")
         webhook_cache[channel.id] = new_wh
         return new_wh
@@ -280,6 +315,7 @@ async def send_translated_content(webhook, parts, display_name, avatar_url):
     send_kwargs = {'username': display_name, 'avatar_url': avatar_url, 'wait': True}
     final_content = parts['content']
     
+    # 拼接剩余的图片链接 (如果有)
     if parts['image_urls']:
         if final_content: final_content += "\n"
         final_content += "\n".join(parts['image_urls'])
@@ -309,13 +345,10 @@ async def on_message(message):
     if message.author == bot.user: return
     if not isinstance(message.channel, discord.TextChannel): return
 
-    # 🛑 死循环绝对防御：检查 Webhook 来源
-    # 如果这条消息是 Webhook 发的，我们需要检查它是否是“我们自己”发的
+    # 死循环防御
     if message.webhook_id:
-        # 获取当前频道的缓存 Webhook，如果缓存没有，尝试获取一下
         current_wh = await get_webhook(message.channel)
         if current_wh and message.webhook_id == current_wh.id:
-            # 这是一个来自本机器人控制的 Webhook 的消息 -> 绝对忽略
             return
 
     cid = str(message.channel.id)
@@ -323,7 +356,6 @@ async def on_message(message):
     name = message.author.display_name 
     
     channel_mappings = global_config["bot_mappings"].get(cid, {})
-    # 尝试 ID 匹配，失败则尝试 Name 匹配
     target_config = channel_mappings.get(uid) or channel_mappings.get(name)
     
     channel_mode = global_config["channel_modes"].get(cid, 'off')
@@ -343,19 +375,15 @@ async def on_message(message):
     should_send = False
     
     if target_config:
-        # 如果是定向监听（换皮），无条件转发
         should_send = True
     else:
-        # 如果是全员自动翻译，必须检查内容是否有实质变化
-        # 因为原消息可能是中文，翻译后没变，如果再发一遍就是刷屏
+        # 翻译检查
         if parts['content'] or parts['embeds'] or parts['image_urls']:
-             # 简单检查文本是否变化 (对于 Embed 比较难精确比对，这里假设 Embed 只要有就发，
-             # 但为了防止中文 Embed 重复发，我们可以加一个文本比对)
-             raw_content = (message.content or "").strip()
-             trans_content = (parts['content'] or "").strip()
+             raw_clean = clean_text(message.content or "") # 也要清洗一下原文再比对
+             trans_clean = (parts['content'] or "").strip()
              
-             # 如果是纯文本消息，且翻译前后一样，则忽略
-             if not message.embeds and not message.attachments and raw_content == trans_content:
+             # 简单比对：如果都是纯文本且内容一致，不发
+             if not message.embeds and not message.attachments and raw_clean == trans_clean:
                  should_send = False
              else:
                  should_send = True
@@ -364,7 +392,8 @@ async def on_message(message):
         await bot.process_commands(message)
         return
 
-    log(f"⚡ 转发消息: [{message.author.display_name}]")
+    match_type = f"ID: {uid}" if channel_mappings.get(uid) else f"Name: {name}" if target_config else "Global Mode"
+    log(f"⚡ 转发消息: [{message.author.display_name}] (Matched by {match_type})")
     
     webhook = await get_webhook(message.channel)
     if webhook:
@@ -398,12 +427,7 @@ async def on_message(message):
 
 @bot.tree.command(name='translation_status', description='查看当前所有频道的翻译设置状态')
 async def translation_status(interaction: discord.Interaction):
-    """
-    列出所有有配置的频道状态
-    """
     embed = discord.Embed(title="📊 自动翻译配置状态", color=0x3498db)
-    
-    # 收集所有涉及的频道 ID
     all_cids = set(global_config["channel_modes"].keys()) | \
                set(global_config["bot_mappings"].keys()) | \
                set(global_config["output_styles"].keys())
@@ -413,26 +437,21 @@ async def translation_status(interaction: discord.Interaction):
         return
 
     for cid in all_cids:
-        # 获取频道对象
         channel = bot.get_channel(int(cid))
-        channel_name = channel.mention if channel else f"Unknown Channel ({cid})"
-        
+        channel_name = channel.mention if channel else f"Unknown ({cid})"
         mode = global_config["channel_modes"].get(cid, "Off")
         style = global_config["output_styles"].get(cid, "Auto")
         mappings = global_config["bot_mappings"].get(cid, {})
         
         status_text = f"**模式**: {mode}\n**样式**: {style}\n"
-        
         if mappings:
             targets = []
             for target, config in mappings.items():
                 targets.append(f"• `{target}` → {config['name']}")
-            status_text += "**定向监听**: \n" + "\n".join(targets)
+            status_text += "**监听**: \n" + "\n".join(targets)
         else:
-            status_text += "**定向监听**: 无"
-            
+            status_text += "**监听**: 无"
         embed.add_field(name=f"📺 {channel_name}", value=status_text, inline=False)
-    
     await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name='set_style', description='设置本频道翻译结果的输出格式')
@@ -451,7 +470,6 @@ async def set_style(interaction: discord.Interaction, style: discord.app_command
 async def setup_bot_translator(interaction: discord.Interaction, target: str, name: str, avatar: discord.Attachment):
     cid = str(interaction.channel.id)
     target_key = target.strip()
-    
     if cid not in global_config["bot_mappings"]:
         global_config["bot_mappings"][cid] = {}
     global_config["bot_mappings"][cid][target_key] = {'name': name, 'avatar': avatar.url}
@@ -463,7 +481,6 @@ async def clear_bot_translator(interaction: discord.Interaction, target: str):
     cid = str(interaction.channel.id)
     target_key = target.strip()
     mappings = global_config["bot_mappings"].get(cid, {})
-    
     if target_key in mappings:
         del global_config["bot_mappings"][cid][target_key]
         save_config()
@@ -485,30 +502,22 @@ async def off_mode(interaction: discord.Interaction):
     save_config() 
     await interaction.response.send_message('🛑 全频道自动翻译已关闭', ephemeral=True)
 
-# ----------------- 右键菜单 (Context Menu) -----------------
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     await interaction.response.defer(ephemeral=True)
     try:
-        # 右键翻译强制使用 Auto 模式 (所见即所得)，不受 set_style 影响
         parts = await process_message_content(message)
-        
         final_text = parts['content']
         if parts['image_urls']: 
             if final_text: final_text += "\n"
             final_text += "\n".join(parts['image_urls'])
-            
         embeds_obj = rebuild_embeds(parts['embeds'])
-        
         if not final_text and not embeds_obj:
             await interaction.followup.send("⚠️ 消息为空", ephemeral=True)
             return
-
         await interaction.followup.send(content=final_text, embeds=embeds_obj, ephemeral=True)
     except Exception as e:
         await interaction.followup.send(f"❌ 错误: {e}", ephemeral=True)
-
-# ==================== 启动 ====================
 
 async def main():
     if not TOKEN:
