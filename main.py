@@ -81,21 +81,24 @@ def log(message):
 
 def clean_text(text):
     """
-    清洗文本：去除链接、特定emoji、残缺Markdown
+    清洗文本：彻底去除 Markdown 链接结构、URL、特定emoji
     """
     if not text: return ""
     
-    # 1. 去除 URL
+    # 1. 【优先】去除 Markdown 格式的链接 [text](url) (保留 text)
+    # 这部分是针对含有文字的链接，保留链接文字
+    text = re.sub(r'\[([^\]]*)\]\(https?://\S+\)', r'\1', text) 
+
+    # 2. 去除所有裸 URL (包括剩下的)
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
     
-    # 2. 【修复】去除残缺的 Markdown 链接 []() 或 [] 或 [](
-    # 针对你遇到的 [] ( 这种残留
-    text = text.replace('[](', '') 
+    # 3. 强力清理残留的括号和方括号组合 (针对 [] ( 这种残渣)
+    text = text.replace('[](', '')
+    text = text.replace('[]', '')
     text = re.sub(r'\[\s*\]\(\s*\)', '', text) # 去除 [ ]()
-    text = re.sub(r'\[.*?\]\(\s*\)', '', text) # 去除 [text]()
     text = re.sub(r'\[\s*\]', '', text)       # 去除 []
     
-    # 3. 去除特定 Emoji
+    # 4. 去除特定 Emoji
     text = text.replace('📷', '')
     
     return text.strip()
@@ -176,6 +179,7 @@ async def process_message_content(message):
         has_text = bool(embed.title or embed.description or embed.fields or (embed.footer and embed.footer.text))
         
         if should_rebuild_embed:
+            # 重建 Rich Embed 逻辑
             embed_data = {
                 'title': await async_translate_text(embed.title) if embed.title else "",
                 'description': await async_translate_text(embed.description) if embed.description else "",
@@ -202,7 +206,7 @@ async def process_message_content(message):
                 })
             parts['embeds'].append(embed_data)
         else:
-            # 链接预览等非 Rich Embed，只提取图片
+            # 如果是 Link Preview，只提取图片
             if embed.image:
                 parts['image_urls'].append(embed.image.url)
             elif embed.thumbnail:
@@ -215,7 +219,6 @@ def apply_output_style(parts, style):
         return parts 
 
     if style == 'flat':
-        # 强制扁平化
         new_content_blocks = []
         if parts['content']:
             new_content_blocks.append(parts['content'])
@@ -239,7 +242,6 @@ def apply_output_style(parts, style):
 
     if style == 'embed':
         # 强制卡片化
-        # 仅当没有 Embed 时创建，或者将现有内容合并
         if not parts['embeds'] and (parts['content'] or parts['image_urls']):
             new_embed = {
                 'title': "",
@@ -254,7 +256,7 @@ def apply_output_style(parts, style):
                 'fields': []
             }
             
-            # 【修复】将第一张图设为 Embed 主图，避免裸链接出现在文字中
+            # 将第一张图设为 Embed 主图
             if parts['image_urls']:
                 new_embed['image'] = parts['image_urls'][0]
                 parts['image_urls'] = parts['image_urls'][1:]
@@ -306,7 +308,6 @@ async def send_translated_content(webhook, parts, display_name, avatar_url):
     send_kwargs = {'username': display_name, 'avatar_url': avatar_url, 'wait': True}
     final_content = parts['content']
     
-    # 拼接剩余的图片链接
     if parts['image_urls']:
         if final_content: final_content += "\n"
         final_content += "\n".join(parts['image_urls'])
@@ -490,21 +491,16 @@ async def off_mode(interaction: discord.Interaction):
     save_config() 
     await interaction.response.send_message('🛑 全频道自动翻译已关闭', ephemeral=True)
 
-# ----------------- 右键菜单 (Context Menu) -----------------
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     await interaction.response.defer(ephemeral=True)
     try:
         parts = await process_message_content(message)
         
-        # 【右键翻译逻辑更新】
-        # 强制使用 Embed 样式，确保“图片”被包含在 Embed 里，而不是裸露的 URL
-        # 同时清洗掉 []() 等残留
+        # 右键翻译：强制 Embed 样式，确保图片和文本被打包，避免裸露 URL
         parts = apply_output_style(parts, 'embed')
         
-        # 提取结果
         final_text = parts['content']
-        # 理论上 Embed 模式下 image_urls 会被移入 embed.image，这里检查是否还有剩余的
         if parts['image_urls']: 
             if final_text: final_text += "\n"
             final_text += "\n".join(parts['image_urls'])
