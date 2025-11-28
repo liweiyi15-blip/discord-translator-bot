@@ -42,7 +42,7 @@ def log(message):
         print(message)
 
 def translate_text_sync(text):
-    """同步翻译核心逻辑"""
+    """同步翻译核心逻辑（含智能换行修正）"""
     if not text: return ""
     # 如果只有链接或数字，不翻译
     if len(text.split()) < 1 and not len(text) > 10: 
@@ -82,6 +82,20 @@ def translate_text_sync(text):
             target_language='zh-CN', 
             format_='text'
         )['translatedText']
+        
+        # ========== 修复行距的核心逻辑 ==========
+        # 1. 去除行尾多余的空格（谷歌翻译常在 \n 前加空格）
+        result = result.replace(' \n', '\n').replace('\n ', '\n')
+        
+        # 2. 智能压缩：如果原文是紧凑列表（没有双换行），但译文出现了双换行，强制压回单换行
+        # 这样可以解决 "行距多空一行" 的问题
+        orig_double_newlines = text.count('\n\n')
+        trans_double_newlines = result.count('\n\n')
+        
+        if trans_double_newlines > orig_double_newlines:
+             # 将连续的换行符替换为单个换行符
+             result = re.sub(r'\n+', '\n', result)
+        # =====================================
         
     except Exception as e:
         print(f'❌ 翻译异常: {e}')
@@ -123,7 +137,6 @@ async def process_message_content(message):
     for embed in message.embeds:
         # 核心判断：只有 rich (富文本卡片) 或 article 类型的 Embed 我们才当做“卡片”处理
         # image/video/link 类型的 Embed 通常是 Discord 根据链接自动生成的预览，我们不需要手动重建它们
-        # 只要把链接放在正文里，Discord 会自己再生成一次
         
         should_rebuild_embed = False
         if embed.type in ['rich', 'article']:
@@ -162,9 +175,6 @@ async def process_message_content(message):
                     'inline': field.inline
                 })
             parts['embeds'].append(embed_data)
-        
-        # 如果不是 Rich Embed (比如 Link Preview)，我们不需要做任何事，
-        # 因为正文里的 URL 会自动触发 Discord 生成新的预览。
         
     return parts
 
@@ -259,7 +269,7 @@ async def on_message(message):
     if not isinstance(message.channel, discord.TextChannel):
         return
 
-    log(f"🔎 收到消息: {message.content[:20]}... [Attachments: {len(message.attachments)}, Embeds: {len(message.embeds)}]")
+    # log(f"🔎 收到消息: {message.content[:20]}...") 
 
     try:
         parts = await process_message_content(message)
@@ -267,13 +277,11 @@ async def on_message(message):
         print(f"❌ 处理失败: {e}")
         return
     
-    # 简单的变动检测：如果有翻译后的 Embed 或有内容，则发送
     should_send = False
     if parts['content'] or parts['embeds'] or parts['image_urls']:
          should_send = True
 
     if not should_send:
-        log(f"⏭️ 无需翻译或为空，跳过")
         await bot.process_commands(message)
         return
 
@@ -287,7 +295,6 @@ async def on_message(message):
                 except: pass 
             
             await send_translated_content(webhook, parts, message.author, current_mode)
-            log(f"✅ 转发成功 (Webhook)")
         else:
             # 无 Webhook 降级处理
             if current_mode == 'replace':
@@ -300,7 +307,6 @@ async def on_message(message):
             
             embeds_obj = rebuild_embeds(parts['embeds'])
             await message.channel.send(content=final_text, embeds=embeds_obj)
-            log(f"✅ 转发成功 (普通消息)")
             
     except discord.Forbidden:
         print(f"❌ 权限不足")
@@ -334,7 +340,7 @@ async def off_mode(interaction: discord.Interaction):
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     """
-    右键菜单翻译：智能判断格式
+    右键菜单翻译
     """
     await interaction.response.defer(ephemeral=True)
     try:
