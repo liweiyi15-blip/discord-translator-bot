@@ -81,26 +81,28 @@ def log(message):
 
 def clean_text(text):
     """
-    清洗文本：去除链接、特定emoji
+    清洗文本：去除链接、特定emoji、残缺Markdown
     """
     if not text: return ""
     
-    # 1. 去除 URL (http/https/www)
+    # 1. 去除 URL
     text = re.sub(r'https?://\S+|www\.\S+', '', text)
     
-    # 2. 去除特定 Emoji (📷)
-    text = text.replace('📷', '')
+    # 2. 去除残缺的 Markdown 链接 []() 或 []
+    text = re.sub(r'\[.*?\]\(\s*\)', '', text) # 去除 [text]()
+    text = re.sub(r'\[\s*\]', '', text)       # 去除 []
     
-    # 3. (可选) 去除 Discord 自定义 Emoji 格式 <:name:id>，如果你希望也去掉的话
-    # text = re.sub(r'<a?:.+?:\d+>', '', text)
+    # 3. 去除特定 Emoji
+    text = text.replace('📷', '')
     
     return text.strip()
 
 def translate_text_sync(text):
-    # 先清洗，再翻译
+    # 先清洗
     text = clean_text(text)
     
     if not text: return ""
+    # 如果清洗后太短，不翻译
     if len(text.split()) < 1 and not len(text) > 10: 
         return text
     if re.search(r'[\u4e00-\u9fff]', text):
@@ -157,35 +159,22 @@ async def process_message_content(message):
     """提取和翻译消息"""
     parts = {'content': message.content or "", 'embeds': [], 'image_urls': []}
 
-    # 翻译内容 (内部已包含清洗)
     if parts['content']:
         parts['content'] = await async_translate_text(parts['content'])
 
-    # 提取附件图片
     if message.attachments:
         for attachment in message.attachments:
             parts['image_urls'].append(attachment.url)
 
-    # 提取 Embeds
     for embed in message.embeds:
         should_rebuild_embed = False
+        # 只有 Rich (机器人发的消息) 或 Article 才作为 Embed 重建
+        # Image/Link/Video 类型的 Embed (通常是链接预览) 我们不重建框，而是提取里面的图
         if embed.type in ['rich', 'article']:
             should_rebuild_embed = True
         
-        has_text = bool(embed.title or embed.description or embed.fields or (embed.footer and embed.footer.text))
-        
-        # 提取 Embed 里的图片
-        if embed.image:
-             # 如果 Embed 只有图没字，它本质就是张图，降级为 image_urls
-            if not has_text:
-                parts['image_urls'].append(embed.image.url)
-                should_rebuild_embed = False
-            else:
-                # 如果有字又有图，保留这个图的引用，后续可能用于 Flat 模式或 Embed 模式的主图
-                # 注意：这里我们不直接加到 image_urls，除非我们要把 Embed 拆了
-                pass 
-
         if should_rebuild_embed:
+            # 重建 Embed 逻辑
             embed_data = {
                 'title': await async_translate_text(embed.title) if embed.title else "",
                 'description': await async_translate_text(embed.description) if embed.description else "",
@@ -200,6 +189,7 @@ async def process_message_content(message):
                     'text': await async_translate_text(embed.footer.text) if embed.footer and embed.footer.text else None,
                     'icon_url': embed.footer.icon_url if embed.footer else None
                 },
+                # 确保这里提取了 Embed 原有的图片
                 'image': embed.image.url if embed.image else None,
                 'thumbnail': embed.thumbnail.url if embed.thumbnail else None,
                 'fields': []
@@ -211,6 +201,13 @@ async def process_message_content(message):
                     'inline': field.inline
                 })
             parts['embeds'].append(embed_data)
+        else:
+            # 如果是链接预览，提取图片用于后续重组
+            if embed.image:
+                parts['image_urls'].append(embed.image.url)
+            elif embed.thumbnail:
+                parts['image_urls'].append(embed.thumbnail.url)
+
     return parts
 
 def apply_output_style(parts, style):
@@ -218,7 +215,7 @@ def apply_output_style(parts, style):
         return parts 
 
     if style == 'flat':
-        # 强制扁平化：Embed -> 纯文本
+        # 强制扁平化
         new_content_blocks = []
         if parts['content']:
             new_content_blocks.append(parts['content'])
@@ -233,7 +230,6 @@ def apply_output_style(parts, style):
             
             if em['footer']['text']: new_content_blocks.append(f"_{em['footer']['text']}_")
             
-            # 提取图片链接
             if em['image']: parts['image_urls'].append(em['image'])
             if em['thumbnail']: parts['image_urls'].append(em['thumbnail'])
 
@@ -243,7 +239,7 @@ def apply_output_style(parts, style):
 
     if style == 'embed':
         # 强制卡片化：纯文本/图 -> Embed
-        # 只有当没有现有 Embed 时才创建新的（避免嵌套）
+        # 仅当目前没有 Embed 时才创建新卡片 (避免嵌套)
         if not parts['embeds'] and (parts['content'] or parts['image_urls']):
             new_embed = {
                 'title': "",
@@ -258,15 +254,15 @@ def apply_output_style(parts, style):
                 'fields': []
             }
             
-            # 【修复图片显示】
-            # 如果有附件图片/提取图片，把第一张作为 Embed 的主图显示
+            # 【关键逻辑】如果存在图片（无论是上传的还是链接提取的）
+            # 强制将其设置为 Embed 的主图
             if parts['image_urls']:
                 new_embed['image'] = parts['image_urls'][0]
-                # 剩下的图片依然作为链接保留，否则就丢了
+                # 剩余图片保留在队列中，作为附图链接
                 parts['image_urls'] = parts['image_urls'][1:]
             
             parts['embeds'].append(new_embed)
-            parts['content'] = "" # 清空正文，因为已移入 Embed
+            parts['content'] = "" # 内容已移入 Embed
         
         return parts
 
@@ -283,11 +279,8 @@ def rebuild_embeds(embed_data_list):
             embed.set_author(name=ed['author']['name'], icon_url=ed['author']['icon_url'])
         if ed['footer']['text']:
             embed.set_footer(text=ed['footer']['text'], icon_url=ed['footer']['icon_url'])
-        
-        # 关键：正确设置 Embed 图片
         if ed['image']:
             embed.set_image(url=ed['image'])
-            
         if ed['thumbnail']:
             embed.set_thumbnail(url=ed['thumbnail'])
         for f in ed['fields']:
@@ -315,7 +308,7 @@ async def send_translated_content(webhook, parts, display_name, avatar_url):
     send_kwargs = {'username': display_name, 'avatar_url': avatar_url, 'wait': True}
     final_content = parts['content']
     
-    # 拼接剩余的图片链接 (如果有)
+    # 拼接剩余的图片链接
     if parts['image_urls']:
         if final_content: final_content += "\n"
         final_content += "\n".join(parts['image_urls'])
@@ -345,7 +338,7 @@ async def on_message(message):
     if message.author == bot.user: return
     if not isinstance(message.channel, discord.TextChannel): return
 
-    # 死循环防御
+    # 🛑 死循环防御
     if message.webhook_id:
         current_wh = await get_webhook(message.channel)
         if current_wh and message.webhook_id == current_wh.id:
@@ -377,12 +370,9 @@ async def on_message(message):
     if target_config:
         should_send = True
     else:
-        # 翻译检查
         if parts['content'] or parts['embeds'] or parts['image_urls']:
-             raw_clean = clean_text(message.content or "") # 也要清洗一下原文再比对
+             raw_clean = clean_text(message.content or "")
              trans_clean = (parts['content'] or "").strip()
-             
-             # 简单比对：如果都是纯文本且内容一致，不发
              if not message.embeds and not message.attachments and raw_clean == trans_clean:
                  should_send = False
              else:
