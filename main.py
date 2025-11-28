@@ -13,9 +13,7 @@ TOKEN = os.getenv('DISCORD_TOKEN')
 MIN_WORDS = 5
 DEBUG = True
 
-# 核心修改：检测环境变量，决定配置文件存在哪
-# 如果在 Railway 上配置了 Volume 挂载到 /data，我们就存在那里
-# 否则（本地开发）存在当前目录
+# 适配 Railway 的持久化存储
 DATA_DIR = os.getenv('DATA_DIR', '.') 
 CONFIG_FILE = os.path.join(DATA_DIR, 'bot_config.json')
 
@@ -38,41 +36,48 @@ else:
     client = None
 
 # ==================== 状态存储与持久化 ====================
-channel_modes = {}
 webhook_cache = {}
-bot_mappings = {} 
+
+# 全局配置结构
+global_config = {
+    "channel_modes": {},      # 翻译开关: replace/off
+    "bot_mappings": {},       # 指定机器人换皮配置
+    "output_styles": {}       # 新增: 输出样式 flat/embed/auto
+}
 
 def load_config():
     """从持久化文件加载配置"""
-    global bot_mappings
-    
-    # 确保目录存在（如果是 /data 这种挂载目录，通常已存在，但为了保险）
+    global global_config
     if DATA_DIR != '.' and not os.path.exists(DATA_DIR):
-        try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            print(f"📂 创建数据目录: {DATA_DIR}")
-        except Exception as e:
-            print(f"❌ 无法创建数据目录: {e}")
+        try: os.makedirs(DATA_DIR, exist_ok=True)
+        except: pass
 
     if os.path.exists(CONFIG_FILE):
         try:
             with open(CONFIG_FILE, 'r', encoding='utf-8') as f:
-                bot_mappings = json.load(f)
-            print(f"📂 已加载配置文件: {CONFIG_FILE} (包含 {len(bot_mappings)} 个频道设定)")
+                data = json.load(f)
+                # 增量合并，防止旧配置缺失新字段
+                for key in global_config.keys():
+                    if key in data:
+                        global_config[key] = data[key]
+                # 兼容旧版本结构
+                if "bot_mappings" not in data and "channel_modes" not in data:
+                     # 假设是第一版配置，全都是 mapping
+                     pass 
+            print(f"📂 配置已加载")
         except Exception as e:
-            print(f"❌ 加载配置文件失败: {e}")
-            bot_mappings = {}
+            print(f"❌ 加载失败: {e}")
     else:
-        print(f"📂 未找到配置文件 {CONFIG_FILE}，将在首次保存时创建")
+        print(f"📂 无配置文件，将在首次保存时创建")
 
 def save_config():
-    """保存配置到持久化文件"""
+    """保存配置"""
     try:
         with open(CONFIG_FILE, 'w', encoding='utf-8') as f:
-            json.dump(bot_mappings, f, ensure_ascii=False, indent=4)
-        print(f"💾 配置已保存至 {CONFIG_FILE}")
+            json.dump(global_config, f, ensure_ascii=False, indent=4)
+        if DEBUG: print("💾 配置已落盘")
     except Exception as e:
-        print(f"❌ 保存配置文件失败: {e}")
+        print(f"❌ 保存失败: {e}")
 
 # ==================== 核心功能函数 ====================
 
@@ -113,6 +118,7 @@ def translate_text_sync(text):
             text, source_language='en', target_language='zh-CN', format_='text'
         )['translatedText']
         
+        # 智能行距修复
         result = result.replace(' \n', '\n').replace('\n ', '\n')
         orig_double_newlines = text.count('\n\n')
         trans_double_newlines = result.count('\n\n')
@@ -134,20 +140,27 @@ async def async_translate_text(text):
     return await loop.run_in_executor(None, functools.partial(translate_text_sync, text))
 
 async def process_message_content(message):
+    """
+    第一步：提取并翻译原消息，保留原始结构 (Parts)
+    """
     parts = {'content': message.content or "", 'embeds': [], 'image_urls': []}
 
+    # 翻译正文
     if parts['content']:
         parts['content'] = await async_translate_text(parts['content'])
 
+    # 提取附件
     if message.attachments:
         for attachment in message.attachments:
             parts['image_urls'].append(attachment.url)
 
+    # 翻译 Embeds
     for embed in message.embeds:
         should_rebuild_embed = False
         if embed.type in ['rich', 'article']:
             should_rebuild_embed = True
         
+        # 纯图 Embed 降级为图片链接
         has_text = bool(embed.title or embed.description or embed.fields or (embed.footer and embed.footer.text))
         if not has_text and embed.image:
             parts['image_urls'].append(embed.image.url)
@@ -179,6 +192,74 @@ async def process_message_content(message):
                     'inline': field.inline
                 })
             parts['embeds'].append(embed_data)
+    return parts
+
+def apply_output_style(parts, style):
+    """
+    第二步：根据设定的 Style 强制转换格式
+    style: 'flat' (纯文本), 'embed' (纯Embed), 'auto' (原样)
+    """
+    if style == 'auto':
+        return parts # 不做改动
+
+    if style == 'flat':
+        # 强制扁平化：将 Embed 内容拆解拼接到 Content
+        new_content_blocks = []
+        if parts['content']:
+            new_content_blocks.append(parts['content'])
+        
+        for em in parts['embeds']:
+            # 模拟 Embed 的排版
+            if em['author']['name']:
+                new_content_blocks.append(f"**{em['author']['name']}**")
+            if em['title']:
+                new_content_blocks.append(f"**{em['title']}**")
+            if em['description']:
+                new_content_blocks.append(em['description'])
+            
+            for field in em['fields']:
+                new_content_blocks.append(f"**{field['name']}**: {field['value']}")
+            
+            if em['footer']['text']:
+                new_content_blocks.append(f"_{em['footer']['text']}_")
+            
+            # 提取 Embed 里的图片到 image_urls
+            if em['image']:
+                parts['image_urls'].append(em['image'])
+            if em['thumbnail']:
+                parts['image_urls'].append(em['thumbnail'])
+
+        parts['embeds'] = [] # 清空 Embeds
+        parts['content'] = "\n\n".join(new_content_blocks).strip() # 合并文本
+        return parts
+
+    if style == 'embed':
+        # 强制 Embed 化：如果内容是纯文本，包装进 Embed
+        if not parts['embeds'] and parts['content']:
+            # 创建一个新的 Embed 容器
+            new_embed = {
+                'title': "",
+                'description': parts['content'],
+                'color': 0x2b2d31, # Discord 默认深色
+                'url': None,
+                'timestamp': None,
+                'author': {'name': None, 'icon_url': None},
+                'footer': {'text': None, 'icon_url': None},
+                'image': None,
+                'thumbnail': None,
+                'fields': []
+            }
+            # 如果有图片，把第一张图设为 Embed 主图
+            if parts['image_urls']:
+                new_embed['image'] = parts['image_urls'][0]
+                # 如果还有多张图，保留在 image_urls 里让它们以链接形式附在后面
+                parts['image_urls'] = parts['image_urls'][1:]
+            
+            parts['embeds'].append(new_embed)
+            parts['content'] = "" # 清空正文
+        
+        return parts
+
     return parts
 
 def rebuild_embeds(embed_data_list):
@@ -220,10 +301,14 @@ async def get_webhook(channel):
 async def send_translated_content(webhook, parts, display_name, avatar_url):
     send_kwargs = {'username': display_name, 'avatar_url': avatar_url, 'wait': True}
     final_content = parts['content']
+    
+    # 拼接剩余的图片链接
     if parts['image_urls']:
         if final_content: final_content += "\n"
         final_content += "\n".join(parts['image_urls'])
+    
     embeds_obj = rebuild_embeds(parts['embeds'])
+    
     if final_content or embeds_obj:
         try:
             await webhook.send(content=final_content, embeds=embeds_obj, **send_kwargs)
@@ -250,40 +335,40 @@ async def on_message(message):
     cid = str(message.channel.id)
     uid = str(message.author.id)
     
-    target_config = bot_mappings.get(cid, {}).get(uid)
-    channel_mode = channel_modes.get(message.channel.id, 'off')
+    target_config = global_config["bot_mappings"].get(cid, {}).get(uid)
+    channel_mode = global_config["channel_modes"].get(cid, 'off')
+    output_style = global_config["output_styles"].get(cid, 'auto') # 获取当前频道的输出偏好
 
     if not target_config and channel_mode == 'off':
         await bot.process_commands(message)
         return
 
     try:
+        # 1. 提取翻译
         parts = await process_message_content(message)
+        
+        # 2. 应用格式强制转换 (新功能)
+        parts = apply_output_style(parts, output_style)
+        
     except Exception as e:
-        print(f"❌ 提取错误: {e}")
+        print(f"❌ 处理错误: {e}")
         return
     
     should_send = False
+    
     if target_config:
         should_send = True
     else:
-        original_text = (message.content or "").strip()
-        translated_text = (parts['content'] or "").strip()
-        if original_text != translated_text:
-            should_send = True
-        
-        if not should_send and message.embeds and parts['embeds']:
-            orig_embed = message.embeds[0]
-            trans_embed = parts['embeds'][0]
-            if ((orig_embed.title or "") != (trans_embed['title'] or "")) or \
-               ((orig_embed.description or "") != (trans_embed['description'] or "")):
-                should_send = True
+        # 变动检测：注意要对比的是 parts['content'] 而不是 raw content
+        # 因为 apply_output_style 可能已经改变了结构
+        if parts['content'] or parts['embeds'] or parts['image_urls']:
+             should_send = True # 只要有转换后的内容就发送 (简化逻辑，避免样式转换后对比困难)
 
     if not should_send:
         await bot.process_commands(message)
         return
 
-    log(f"⚡ 处理消息: [{message.author.display_name}]")
+    log(f"⚡ 转发消息: [{message.author.display_name}] (Style: {output_style})")
     webhook = await get_webhook(message.channel)
     
     if webhook:
@@ -301,7 +386,6 @@ async def on_message(message):
 
         await send_translated_content(webhook, parts, send_name, send_avatar)
     else:
-        # 无 Webhook 降级
         if target_config or channel_mode == 'replace':
             try: await message.delete()
             except: pass
@@ -316,56 +400,58 @@ async def on_message(message):
 
 # ==================== Slash 命令 ====================
 
-@bot.tree.command(name='setup_bot_translator', description='设定：自动翻译指定机器人，并使用自定义头像和名字发布')
-async def setup_bot_translator(interaction: discord.Interaction, target: discord.User, name: str, avatar: discord.Attachment):
+@bot.tree.command(name='set_style', description='设置本频道翻译结果的输出格式')
+@discord.app_commands.choices(style=[
+    discord.app_commands.Choice(name="Auto (自动: 纯文对纯文，卡片对卡片)", value="auto"),
+    discord.app_commands.Choice(name="Flat (扁平: 强制转为纯文本+大图)", value="flat"),
+    discord.app_commands.Choice(name="Embed (卡片: 强制转为Embed卡片)", value="embed")
+])
+async def set_style(interaction: discord.Interaction, style: discord.app_commands.Choice[str]):
+    """设置输出样式"""
     cid = str(interaction.channel.id)
-    uid = str(target.id)
-    
-    if cid not in bot_mappings:
-        bot_mappings[cid] = {}
-        
-    bot_mappings[cid][uid] = {
-        'name': name,
-        'avatar': avatar.url 
-    }
+    global_config["output_styles"][cid] = style.value
     save_config()
-    await interaction.response.send_message(f"✅ 设定成功！(已保存到持久化存储)\n🎯 监听: {target.mention}\n🎭 新名: {name}", ephemeral=True)
+    await interaction.response.send_message(f"🎨 本频道输出样式已设置为: **{style.name}**", ephemeral=True)
 
-@bot.tree.command(name='clear_bot_translator', description='清除当前频道对指定机器人的翻译设定')
-async def clear_bot_translator(interaction: discord.Interaction, target: discord.User):
+@bot.tree.command(name='setup_bot_translator', description='设定：输入ID来指定机器人/Webhook，并使用自定义头像和名字发布')
+async def setup_bot_translator(interaction: discord.Interaction, target_id: str, name: str, avatar: discord.Attachment):
     cid = str(interaction.channel.id)
-    uid = str(target.id)
-    if cid in bot_mappings and uid in bot_mappings[cid]:
-        del bot_mappings[cid][uid]
+    uid = target_id.strip()
+    if not uid.isdigit():
+         await interaction.response.send_message(f"⚠️ ID 格式错误。", ephemeral=True)
+         return
+
+    if cid not in global_config["bot_mappings"]:
+        global_config["bot_mappings"][cid] = {}
+    global_config["bot_mappings"][cid][uid] = {'name': name, 'avatar': avatar.url}
+    save_config()
+    await interaction.response.send_message(f"✅ 设定成功！监听 ID: `{uid}`", ephemeral=True)
+
+@bot.tree.command(name='clear_bot_translator', description='清除当前频道对指定ID的翻译设定')
+async def clear_bot_translator(interaction: discord.Interaction, target_id: str):
+    cid = str(interaction.channel.id)
+    uid = target_id.strip()
+    mappings = global_config["bot_mappings"].get(cid, {})
+    if uid in mappings:
+        del global_config["bot_mappings"][cid][uid]
         save_config()
-        await interaction.response.send_message(f"🗑️ 已移除对 {target.mention} 的特殊设定。", ephemeral=True)
+        await interaction.response.send_message(f"🗑️ 已移除对 ID `{uid}` 的设定。", ephemeral=True)
     else:
         await interaction.response.send_message(f"⚠️ 未找到设定。", ephemeral=True)
 
-@bot.tree.command(name='start_translate', description='开启本频道全员自动翻译 (不换皮)')
+@bot.tree.command(name='start_translate', description='开启本频道全员自动翻译')
 async def start_translate(interaction: discord.Interaction):
-    channel_modes[interaction.channel.id] = 'replace'
+    cid = str(interaction.channel.id)
+    global_config["channel_modes"][cid] = 'replace'
+    save_config() 
     await interaction.response.send_message('✅ 已开启全频道自动翻译', ephemeral=True)
 
 @bot.tree.command(name='off_mode', description='关闭本频道自动翻译')
 async def off_mode(interaction: discord.Interaction):
-    channel_modes[interaction.channel.id] = 'off'
+    cid = str(interaction.channel.id)
+    global_config["channel_modes"][cid] = 'off'
+    save_config() 
     await interaction.response.send_message('🛑 全频道自动翻译已关闭', ephemeral=True)
-
-@bot.tree.context_menu(name='翻译此消息')
-async def translate_message(interaction: discord.Interaction, message: discord.Message):
-    await interaction.response.defer(ephemeral=True)
-    try:
-        parts = await process_message_content(message)
-        final_text = parts['content']
-        if parts['image_urls']: final_text += "\n" + "\n".join(parts['image_urls'])
-        embeds_obj = rebuild_embeds(parts['embeds'])
-        if not final_text and not embeds_obj:
-            await interaction.followup.send("⚠️ 消息为空", ephemeral=True)
-            return
-        await interaction.followup.send(content=final_text, embeds=embeds_obj, ephemeral=True)
-    except Exception as e:
-        await interaction.followup.send(f"❌ 错误: {e}", ephemeral=True)
 
 # ==================== 启动 ====================
 
