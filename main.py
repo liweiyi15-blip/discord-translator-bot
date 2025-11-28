@@ -36,7 +36,7 @@ else:
     client = None
 
 # ==================== 状态存储与持久化 ====================
-webhook_cache = {}
+webhook_cache = {} 
 
 global_config = {
     "channel_modes": {},      
@@ -58,8 +58,6 @@ def load_config():
                 for key in global_config.keys():
                     if key in data:
                         global_config[key] = data[key]
-                if "bot_mappings" not in data and "channel_modes" not in data:
-                     pass 
             print(f"📂 配置已加载")
         except Exception as e:
             print(f"❌ 加载失败: {e}")
@@ -114,7 +112,6 @@ def translate_text_sync(text):
             text, source_language='en', target_language='zh-CN', format_='text'
         )['translatedText']
         
-        # 智能行距修复
         result = result.replace(' \n', '\n').replace('\n ', '\n')
         orig_double_newlines = text.count('\n\n')
         trans_double_newlines = result.count('\n\n')
@@ -184,7 +181,6 @@ async def process_message_content(message):
     return parts
 
 def apply_output_style(parts, style):
-    """根据设定的 Style 强制转换格式"""
     if style == 'auto':
         return parts 
 
@@ -267,9 +263,12 @@ async def get_webhook(channel):
     try:
         webhooks = await channel.webhooks()
         for wh in webhooks:
+            # 简单判断：如果我们能拿到 token，说明这个 webhook 是我们可以控制的
+            # 通常机器人创建的 webhook 才有 token (对机器人可见)
             if wh.token: 
                 webhook_cache[channel.id] = wh
                 return wh
+        
         new_wh = await channel.create_webhook(name="Translation Hook")
         webhook_cache[channel.id] = new_wh
         return new_wh
@@ -300,9 +299,8 @@ async def on_ready():
     print(f'🚀 {bot.user} 已上线！')
     load_config() 
     try:
-        # 同步命令树 (包括 Slash 命令和右键菜单)
-        synced = await bot.tree.sync()
-        print(f'✅ 命令已同步 ({len(synced)} 个命令)')
+        await bot.tree.sync()
+        print(f'✅ 命令已同步')
     except Exception as e:
         print(f'❌ 命令同步失败: {e}')
 
@@ -311,11 +309,21 @@ async def on_message(message):
     if message.author == bot.user: return
     if not isinstance(message.channel, discord.TextChannel): return
 
+    # 🛑 死循环绝对防御：检查 Webhook 来源
+    # 如果这条消息是 Webhook 发的，我们需要检查它是否是“我们自己”发的
+    if message.webhook_id:
+        # 获取当前频道的缓存 Webhook，如果缓存没有，尝试获取一下
+        current_wh = await get_webhook(message.channel)
+        if current_wh and message.webhook_id == current_wh.id:
+            # 这是一个来自本机器人控制的 Webhook 的消息 -> 绝对忽略
+            return
+
     cid = str(message.channel.id)
     uid = str(message.author.id)
     name = message.author.display_name 
     
     channel_mappings = global_config["bot_mappings"].get(cid, {})
+    # 尝试 ID 匹配，失败则尝试 Name 匹配
     target_config = channel_mappings.get(uid) or channel_mappings.get(name)
     
     channel_mode = global_config["channel_modes"].get(cid, 'off')
@@ -326,20 +334,31 @@ async def on_message(message):
         return
 
     try:
-        # 1. 提取翻译
         parts = await process_message_content(message)
-        # 2. 应用样式 (仅自动模式应用，右键菜单不应用)
         parts = apply_output_style(parts, output_style)
     except Exception as e:
         print(f"❌ 处理错误: {e}")
         return
     
     should_send = False
+    
     if target_config:
+        # 如果是定向监听（换皮），无条件转发
         should_send = True
     else:
+        # 如果是全员自动翻译，必须检查内容是否有实质变化
+        # 因为原消息可能是中文，翻译后没变，如果再发一遍就是刷屏
         if parts['content'] or parts['embeds'] or parts['image_urls']:
-             should_send = True 
+             # 简单检查文本是否变化 (对于 Embed 比较难精确比对，这里假设 Embed 只要有就发，
+             # 但为了防止中文 Embed 重复发，我们可以加一个文本比对)
+             raw_content = (message.content or "").strip()
+             trans_content = (parts['content'] or "").strip()
+             
+             # 如果是纯文本消息，且翻译前后一样，则忽略
+             if not message.embeds and not message.attachments and raw_content == trans_content:
+                 should_send = False
+             else:
+                 should_send = True
 
     if not should_send:
         await bot.process_commands(message)
@@ -375,7 +394,46 @@ async def on_message(message):
 
     await bot.process_commands(message)
 
-# ==================== Slash 命令 & Context Menu ====================
+# ==================== Slash 命令 ====================
+
+@bot.tree.command(name='translation_status', description='查看当前所有频道的翻译设置状态')
+async def translation_status(interaction: discord.Interaction):
+    """
+    列出所有有配置的频道状态
+    """
+    embed = discord.Embed(title="📊 自动翻译配置状态", color=0x3498db)
+    
+    # 收集所有涉及的频道 ID
+    all_cids = set(global_config["channel_modes"].keys()) | \
+               set(global_config["bot_mappings"].keys()) | \
+               set(global_config["output_styles"].keys())
+    
+    if not all_cids:
+        await interaction.response.send_message("💤 当前没有任何频道开启翻译或设置规则。", ephemeral=True)
+        return
+
+    for cid in all_cids:
+        # 获取频道对象
+        channel = bot.get_channel(int(cid))
+        channel_name = channel.mention if channel else f"Unknown Channel ({cid})"
+        
+        mode = global_config["channel_modes"].get(cid, "Off")
+        style = global_config["output_styles"].get(cid, "Auto")
+        mappings = global_config["bot_mappings"].get(cid, {})
+        
+        status_text = f"**模式**: {mode}\n**样式**: {style}\n"
+        
+        if mappings:
+            targets = []
+            for target, config in mappings.items():
+                targets.append(f"• `{target}` → {config['name']}")
+            status_text += "**定向监听**: \n" + "\n".join(targets)
+        else:
+            status_text += "**定向监听**: 无"
+            
+        embed.add_field(name=f"📺 {channel_name}", value=status_text, inline=False)
+    
+    await interaction.response.send_message(embed=embed, ephemeral=True)
 
 @bot.tree.command(name='set_style', description='设置本频道翻译结果的输出格式')
 @discord.app_commands.choices(style=[
@@ -428,16 +486,12 @@ async def off_mode(interaction: discord.Interaction):
     await interaction.response.send_message('🛑 全频道自动翻译已关闭', ephemeral=True)
 
 # ----------------- 右键菜单 (Context Menu) -----------------
-# 确保这个名字在 Context Menu 中显示为 "翻译此消息"
-# 行为逻辑: 强制 Auto (镜像)，不读取 set_style 的设置
 @bot.tree.context_menu(name='翻译此消息')
 async def translate_message(interaction: discord.Interaction, message: discord.Message):
     await interaction.response.defer(ephemeral=True)
     try:
-        # 1. 提取翻译 (process_message_content 默认就是 Auto 模式)
+        # 右键翻译强制使用 Auto 模式 (所见即所得)，不受 set_style 影响
         parts = await process_message_content(message)
-        
-        # 2. 不调用 apply_output_style，直接输出，实现“所见即所得”
         
         final_text = parts['content']
         if parts['image_urls']: 
