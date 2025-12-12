@@ -89,7 +89,7 @@ def clean_text(text):
     # 3. 强力清理残留的括号和方括号组合
     text = text.replace('[](', '').replace('[]', '')
     text = re.sub(r'\[\s*\]\(\s*\)', '', text) 
-    text = re.sub(r'\[\s*\]', '', text)       
+    text = re.sub(r'\[\s*\]', '', text)        
     # 4. 去除特定 Emoji
     text = text.replace('📷', '')
     return text.strip()
@@ -97,7 +97,12 @@ def clean_text(text):
 def translate_text_sync(text):
     text = clean_text(text)
     if not text: return ""
-    if len(text.split()) < 1 and not len(text) > 10: return text
+    
+    # ------------------ 修改区域 ------------------
+    # 修改要求：英文少于15个字母的内容不要翻译
+    if len(text) < 15: return text
+    # ---------------------------------------------
+
     if re.search(r'[\u4e00-\u9fff]', text): return text
     
     mention_placeholders = {}
@@ -387,9 +392,7 @@ async def on_message(message):
             except: pass
         # 降级发送略...
 
-# ==================== Slash 命令 (保持不变) ====================
-# (此处省略未修改的 Slash 命令代码，请直接使用上一版中的命令部分)
-# 为确保完整性，以下是命令部分副本
+# ==================== Slash 命令 ====================
 
 @bot.tree.command(name='set_scope', description='设置处理范围：仅翻译英文 或 强制处理所有消息(包括中文)')
 @discord.app_commands.choices(scope=[
