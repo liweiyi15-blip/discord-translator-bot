@@ -503,6 +503,40 @@ async def translate_message(interaction: discord.Interaction, message: discord.M
     except Exception as e:
         await interaction.followup.send(f"❌ 错误: {e}", ephemeral=True)
 
+# ==================== 新增：提取文字功能 (修复 iOS 无法复制问题) ====================
+@bot.tree.context_menu(name='获取纯文本')
+async def get_raw_text(interaction: discord.Interaction, message: discord.Message):
+    """
+    iOS 专用辅助功能：
+    长按 Embed 消息 -> Apps -> 获取纯文本
+    这会发送一条只有你自己可见的(Ephemeral)纯文本消息，方便复制。
+    """
+    content_list = []
+    
+    # 1. 提取普通消息内容
+    if message.content:
+        content_list.append(message.content)
+    
+    # 2. 提取 Embeds 中的所有文本 (标题, 描述, 字段)
+    for embed in message.embeds:
+        if embed.title:
+            content_list.append(f"【标题】 {embed.title}")
+        if embed.description:
+            content_list.append(embed.description)
+        for field in embed.fields:
+            content_list.append(f"【{field.name}】: {field.value}")
+        if embed.footer and embed.footer.text:
+            content_list.append(f"_{embed.footer.text}_")
+
+    final_text = "\n\n".join(content_list)
+    
+    if not final_text:
+        await interaction.response.send_message("⚠️ 这条消息没有任何可复制的文本内容。", ephemeral=True)
+    else:
+        # 使用代码块包裹，防止格式混乱，且方便全选
+        # ephemeral=True 确保只有你自己能看到
+        await interaction.response.send_message(f"📋 **已提取文本 (仅你可见):**\n\n{final_text}", ephemeral=True)
+
 async def main():
     if not TOKEN:
         print('❌ 错误: 未设置 DISCORD_TOKEN')
