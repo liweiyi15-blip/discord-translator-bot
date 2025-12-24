@@ -535,7 +535,7 @@ async def get_raw_text(interaction: discord.Interaction, message: discord.Messag
     else:
         # 使用代码块包裹，防止格式混乱，且方便全选
         # ephemeral=True 确保只有你自己能看到
-        await interaction.response.send_message(f"📋 **已提取文本 (仅你可见):**\n\n{final_text}", ephemeral=True)
+        await interaction.response.send_message(f"{final_text}", ephemeral=True)
 
 async def main():
     if not TOKEN:
@@ -545,3 +545,4 @@ async def main():
 
 if __name__ == '__main__':
     asyncio.run(main())
+
